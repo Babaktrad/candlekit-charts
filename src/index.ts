@@ -17,8 +17,12 @@ export * from "./core/theme";
 export * from "./events/eventBus";
 export * from "./plugins/types";
 
+// ── Browser-window helpers (multi-window / detached-panel correctness) ──────────
+export * from "./dom/ownerWindow";
+
 // ── Chart ───────────────────────────────────────────────────────────────────────
 export * from "./chart/ChartController";
+export * from "./chart/liveEdgeFollower";
 
 // ── Data source contracts ───────────────────────────────────────────────────────
 export * from "./data-source/types";
@@ -56,12 +60,14 @@ export * from "./measurement/ChartCoordinateUtils";
 export * from "./measurement/MeasurementController";
 export * from "./measurement/PointMarkerPrimitive";
 export * from "./measurement/PointMarkerController";
+export * from "./measurement/CrosshairMarkerPrimitive";
 
 // ── Indicators (registry + controller + built-in catalog; pluggable) ────────────
 export * from "./indicators/types";
 export * from "./indicators/registry";
 export * from "./indicators/builtin";
 export * from "./indicators/IndicatorController";
+export * from "./indicators/paneKeyRegistry";
 
 // ── Replay ──────────────────────────────────────────────────────────────────────
 export * from "./replay/types";

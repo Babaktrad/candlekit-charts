@@ -35,6 +35,7 @@ data source ─► core/data (resample/normalize) ─► ChartController ─► 
 | --- | --- | --- |
 | `src/core/` | Pure types, data normalize/resample, theme, time. No runtime deps. | nothing (except `lightweight-charts` *types* in theme is avoided — theme returns plain objects) |
 | `src/events/` | Typed `EventBus`. | nothing |
+| `src/dom/` | Dependency-free DOM leaf: `ownerWindowOf` / `ownerDocumentOf` (resolve the window/document from a node, never the module global — a detached panel lives in another `document` but the same JS realm) + `KVStore` / `localStorageKV`. Keeps `core/` DOM-free and lets sibling engines share a storage backend without importing each other. | nothing (DOM lib types only) |
 | `src/plugins/` | `ChartPlugin` + `PluginContext` + `ChartEventMap`. | `lightweight-charts` (types), `core`, `events` |
 | `src/chart/` | `ChartController` — the imperative chart wrapper. | `lightweight-charts`, `core`, `events`, `plugins` |
 | `src/data-source/` | `BarDataSource` / `StreamingDataSource` / `ReplayDataSource` contracts. | `core` |

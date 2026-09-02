@@ -5,8 +5,14 @@
  * a {@link ReplayBarEvent} for each newly-visible bar.
  *
  * Ported from the application's replay engine; decoupled to read from a
- * {@link ReplayDataSource} you provide. `setTimeout` is used only to pace UI
- * emission — speed=N collapses pacing to ~`BASE_TICK_MS / N` per advance.
+ * {@link ReplayDataSource} you provide. The scheduler is used only to pace UI
+ * emission — speed=N collapses pacing to ~`BASE_TICK_MS / N` per advance — and
+ * is injectable so a background-throttled document cannot slow playback down
+ * (see {@link ReplayScheduler}).
+ *
+ * A coarse intraday series also materializes a finer *driver* series, which
+ * gives the cursor driver-resolution motion and lets the newest coarse bar grow
+ * instead of printing complete (see {@link ReplayControllerImpl.getBarsUpToCursor}).
  */
 
 import type { Bar, IntervalCode, SymbolId, Timestamp } from "../core/types";
@@ -16,9 +22,16 @@ import type {
   ReplayCursor,
   ReplayEngineOptions,
   ReplayManifest,
+  ReplayScheduler,
   ReplaySeriesSpec,
   ReplayState,
 } from "./types";
+
+/** Host timers. Swap for a worker-backed clock via {@link ReplayScheduler}. */
+const NATIVE_SCHEDULER: ReplayScheduler = {
+  setTimeout: (cb, ms) => setTimeout(cb, ms) as unknown as number,
+  clearTimeout: (h) => clearTimeout(h as unknown as ReturnType<typeof setTimeout>),
+};
 
 const DEFAULT_OPTIONS: ReplayEngineOptions = {
   cacheDays: 8,
@@ -26,7 +39,12 @@ const DEFAULT_OPTIONS: ReplayEngineOptions = {
   prefetchForwardOnTailPct: 0.15,
 };
 
+const DEFAULT_DRIVER_INTERVAL = "1m";
+
 const BASE_TICK_MS = 1000;
+
+/** Max playback speed multiplier accepted by {@link ReplayControllerImpl.setSpeed}. */
+const MAX_SPEED = 100;
 
 interface SeriesKey {
   symbol: SymbolId;
@@ -65,6 +83,50 @@ function lowerBoundIndex(arr: Bar[], ts: Timestamp): number {
   return lo;
 }
 
+/**
+ * Minutes per interval code ("5m" → 5, "1h" → 60). Anything the pattern does
+ * not match (day/week/month codes, custom vocabularies) → null, which means
+ * "not an intraday code" and disables the driver machinery for that series.
+ */
+function intradayMinutes(code: IntervalCode): number | null {
+  const m = /^(\d+)(m|h)$/.exec(code);
+  return m ? Number(m[1]) * (m[2] === "h" ? 60 : 1) : null;
+}
+
+/** First bar of the newest cached day that actually holds bars, else null. */
+function firstBarOfLatestDay(cache: SeriesCache): Bar | null {
+  const dates = Array.from(cache.days.keys()).sort();
+  for (let i = dates.length - 1; i >= 0; i--) {
+    const bars = cache.days.get(dates[i])!.bars;
+    if (bars.length > 0) return bars[0];
+  }
+  return null;
+}
+
+/**
+ * Fold the driver bars of one open bucket into a single partial bar stamped at
+ * the bucket start. Returns null when the bucket's own first driver bar is not
+ * cached, so a holed driver series degrades to the stored coarse bar rather
+ * than inventing a candle out of a partial window.
+ */
+function foldPartial(driver: Bar[], from: Timestamp, to: Timestamp): Bar | null {
+  const start = lowerBoundIndex(driver, from);
+  const first = driver[start];
+  if (!first || first.ts !== from) return null;
+  let high = first.high;
+  let low = first.low;
+  let close = first.close;
+  let volume = 0;
+  for (let i = start; i < driver.length && driver[i].ts <= to; i++) {
+    const b = driver[i];
+    if (b.high > high) high = b.high;
+    if (b.low < low) low = b.low;
+    close = b.close;
+    volume += b.volume ?? 0;
+  }
+  return { ts: from, open: first.open, high, low, close, volume };
+}
+
 export class ReplayControllerImpl implements ReplayController {
   private state: ReplayState = { status: "idle" };
   private subs = new Set<(s: ReplayState) => void>();
@@ -72,12 +134,53 @@ export class ReplayControllerImpl implements ReplayController {
   private caches = new Map<string, SeriesCache>();
   private lruCounter = 0;
   private nextSeq = 1;
-  private tickHandle: ReturnType<typeof setTimeout> | null = null;
-  private prefetchInflight = new Set<string>();
+  private tickHandle: number | null = null;
+  /**
+   * In-flight day fetches keyed `symbol|interval|date`. Holding the promise
+   * (rather than a bare marker) lets a second caller JOIN the outstanding fetch
+   * instead of dropping its call — callers that await, such as the tail-stall
+   * retry in `scheduleTick`, must observe the bars once they land. It also caps
+   * outstanding work at one request per (series, day) at any playback speed.
+   */
+  private prefetchInflight = new Map<string, Promise<void>>();
   private activeSeries: ReplaySeriesSpec[] = [];
   private dataVersion = 0;
 
-  constructor(private readonly options: ReplayEngineOptions = DEFAULT_OPTIONS) {}
+  private readonly scheduler: ReplayScheduler;
+  private readonly driverInterval: IntervalCode;
+  private readonly useDrivers: boolean;
+
+  constructor(private readonly options: ReplayEngineOptions = DEFAULT_OPTIONS) {
+    this.scheduler = options.scheduler ?? NATIVE_SCHEDULER;
+    this.driverInterval = options.driverInterval ?? DEFAULT_DRIVER_INTERVAL;
+    this.useDrivers = options.minuteDrivers ?? true;
+  }
+
+  /** True for an intraday series coarser than the driver interval. */
+  private needsDriver(interval: IntervalCode): boolean {
+    if (!this.useDrivers) return false;
+    const mins = intradayMinutes(interval);
+    const driverMins = intradayMinutes(this.driverInterval);
+    return mins != null && driverMins != null && mins > driverMins;
+  }
+
+  /**
+   * Every coarse intraday series also materializes its symbol's driver series.
+   *
+   * Two jobs: the cursor advances over the union of ALL cached bars, so the
+   * driver gives a 5m/15m/1h chart driver-bar cursor motion instead of jumping
+   * a whole bucket per tick; and `getBarsUpToCursor` folds those driver bars
+   * into the bucket that is still forming.
+   */
+  private withDrivers(specs: readonly ReplaySeriesSpec[]): ReplaySeriesSpec[] {
+    const out = specs.map((s) => ({ symbol: s.symbol, interval: s.interval }));
+    for (const s of specs) {
+      if (!this.needsDriver(s.interval)) continue;
+      const driver = { symbol: s.symbol, interval: this.driverInterval };
+      if (!out.some((o) => seriesKey(o) === seriesKey(driver))) out.push(driver);
+    }
+    return out;
+  }
 
   getState(): ReplayState {
     return this.state;
@@ -98,14 +201,29 @@ export class ReplayControllerImpl implements ReplayController {
     this.caches.clear();
     this.nextSeq = 1;
     this.dataVersion = 0;
-    this.activeSeries = manifest.series.map((s) => ({ symbol: s.symbol, interval: s.interval }));
-    this.transition({ status: "loading", manifest });
+    this.activeSeries = this.withDrivers(manifest.series);
+
+    // Progress is reported per series so a stuck load names what it is waiting
+    // on. Without it "loading…" is the only thing a panel can say for as long
+    // as any one fetch takes — which, when the browser has queued that fetch
+    // behind a saturated connection pool, is indistinguishable from forever.
+    const startedAt = Date.now();
+    const total = this.activeSeries.length;
+    let done = 0;
+    const stage = (step: string) =>
+      this.transition({
+        status: "loading",
+        manifest,
+        progress: { startedAt, done, total, step },
+      });
+    stage("starting");
 
     try {
       const startDate = tsToDate(manifest.start);
 
       await Promise.all(
         this.activeSeries.map(async (spec) => {
+          stage(`${spec.symbol} ${spec.interval} ${startDate}`);
           await this.fetchAndCacheDay(manifest, spec, startDate);
           const before = await manifest.source.listDatesBefore(
             spec.symbol,
@@ -114,12 +232,27 @@ export class ReplayControllerImpl implements ReplayController {
             this.options.prefetchBackwardDays,
           );
           await Promise.all(before.map((d) => this.fetchAndCacheDay(manifest, spec, d)));
+          done += 1;
+          stage(`${spec.symbol} ${spec.interval} done`);
         }),
       );
 
       const cursorTs = this.findInitialCursor(manifest);
       if (cursorTs == null) {
-        this.transition({ status: "error", manifest, error: "No bars available in manifest range" });
+        // Distinguish "every fetch came back empty" from "the days loaded but
+        // hold nothing at or after the start". They used to print the same
+        // sentence, and only one of them is about the date the caller picked.
+        // Counted in BARS, not cached days: a day entry is written even for an
+        // empty response, so a day count can never tell the two apart.
+        const cachedBars = Array.from(this.caches.values()).reduce((n, c) => n + c.flat.length, 0);
+        this.transition({
+          status: "error",
+          manifest,
+          error:
+            cachedBars === 0
+              ? `No data returned for ${startDate} — every series fetch came back empty (check the data source, and that the date is a session day).`
+              : `No bars available in the manifest range (${startDate}). The days loaded but hold no bars at or after the start.`,
+        });
         return;
       }
 
@@ -145,21 +278,29 @@ export class ReplayControllerImpl implements ReplayController {
 
   async ensureSeries(symbol: SymbolId, interval: IntervalCode): Promise<void> {
     if (this.state.status !== "ready") return;
-    const key = seriesKey({ symbol, interval });
-    const already = this.activeSeries.some((s) => seriesKey(s) === key);
     const manifest = this.state.manifest;
     const cursorDate = tsToDate(this.state.cursor.ts);
 
-    if (!already) this.activeSeries.push({ symbol, interval });
+    // Requested interval + its driver (see withDrivers).
+    const specs = this.withDrivers([{ symbol, interval }]);
+    for (const spec of specs) {
+      if (!this.activeSeries.some((s) => seriesKey(s) === seriesKey(spec))) {
+        this.activeSeries.push(spec);
+      }
+    }
 
-    await this.fetchAndCacheDay(manifest, { symbol, interval }, cursorDate);
-    const before = await manifest.source.listDatesBefore(
-      symbol,
-      interval,
-      cursorDate,
-      this.options.prefetchBackwardDays,
+    await Promise.all(
+      specs.map(async (spec) => {
+        await this.fetchAndCacheDay(manifest, spec, cursorDate);
+        const before = await manifest.source.listDatesBefore(
+          spec.symbol,
+          spec.interval,
+          cursorDate,
+          this.options.prefetchBackwardDays,
+        );
+        await Promise.all(before.map((d) => this.fetchAndCacheDay(manifest, spec, d)));
+      }),
     );
-    await Promise.all(before.map((d) => this.fetchAndCacheDay(manifest, { symbol, interval }, d)));
 
     if (this.state.status !== "ready") return;
     this.dataVersion++;
@@ -182,6 +323,20 @@ export class ReplayControllerImpl implements ReplayController {
 
   play(): void {
     if (this.state.status !== "ready" || this.state.playing) return;
+    // Pressing Play while parked at the very end of the cached data (after a
+    // jump-to-latest, or a manifest whose day resolved to the tail) used to
+    // no-op: the first advance found no next bar and flipped `playing` straight
+    // back off. Resume-from-end restarts the session instead.
+    if (!this.hasBarAfter(this.state.cursor.ts)) {
+      const startTs = this.findInitialCursor(this.state.manifest);
+      if (startTs != null && startTs < this.state.cursor.ts) {
+        this.state = {
+          ...this.state,
+          cursor: { ts: startTs, seq: this.nextSeq++ },
+          window: this.computeWindow(),
+        };
+      }
+    }
     this.state = { ...this.state, playing: true };
     this.notify();
     this.scheduleTick();
@@ -216,7 +371,7 @@ export class ReplayControllerImpl implements ReplayController {
 
   setSpeed(multiplier: number): void {
     if (this.state.status !== "ready") return;
-    const speed = Math.max(0.1, Math.min(64, multiplier));
+    const speed = Math.max(0.1, Math.min(MAX_SPEED, multiplier));
     this.state = { ...this.state, speed };
     this.notify();
     if (this.state.playing) {
@@ -225,6 +380,18 @@ export class ReplayControllerImpl implements ReplayController {
     }
   }
 
+  /**
+   * Bars at or before the cursor for one series.
+   *
+   * The last coarse bar at/below the cursor is still FORMING. Its stored values
+   * are the FINISHED bucket, so returning it verbatim prints a complete 5m
+   * candle the instant its bucket opens — the cursor sits on the bucket's first
+   * minute but the bar already carries its last minute's close. When a driver
+   * series is cached, that bar is rebuilt from the driver bars up to the cursor
+   * so it grows one driver bar at a time like a live bar, and only becomes the
+   * stored bar once the cursor leaves the bucket. No driver cached → the stored
+   * bar, unchanged.
+   */
   getBarsUpToCursor(symbol: SymbolId, interval: IntervalCode): readonly Bar[] {
     if (this.state.status !== "ready") return [];
     const cache = this.caches.get(seriesKey({ symbol, interval }));
@@ -233,7 +400,15 @@ export class ReplayControllerImpl implements ReplayController {
     const idx = lowerBoundIndex(cache.flat, cursorTs);
     let endExclusive = idx;
     if (endExclusive < cache.flat.length && cache.flat[endExclusive].ts === cursorTs) endExclusive += 1;
-    return cache.flat.slice(0, endExclusive);
+    const bars = cache.flat.slice(0, endExclusive);
+
+    if (!this.needsDriver(interval) || bars.length === 0) return bars;
+    const driver = this.caches.get(seriesKey({ symbol, interval: this.driverInterval }))?.flat;
+    if (!driver || driver.length === 0) return bars;
+    const forming = foldPartial(driver, bars[bars.length - 1].ts, cursorTs);
+    if (!forming) return bars;
+    bars[bars.length - 1] = forming;
+    return bars;
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
@@ -245,30 +420,36 @@ export class ReplayControllerImpl implements ReplayController {
   ): Promise<void> {
     const key = seriesKey(spec);
     const inflightKey = `${key}|${date}`;
-    if (this.prefetchInflight.has(inflightKey)) return;
-    let cache = this.caches.get(key);
+    // Join an in-flight fetch instead of dropping the call — a caller that
+    // awaits must observe the bars once they land.
+    const inflight = this.prefetchInflight.get(inflightKey);
+    if (inflight) return inflight;
+    const cache = this.caches.get(key);
     if (cache?.days.has(date)) {
       cache.days.get(date)!.lru = ++this.lruCounter;
       return;
     }
-    this.prefetchInflight.add(inflightKey);
-    try {
-      const bars = await manifest.source.fetchDay(spec.symbol, spec.interval, date);
-      cache = this.caches.get(key);
-      if (!cache) {
-        cache = { days: new Map(), flat: [] };
-        this.caches.set(key, cache);
+    const run = (async () => {
+      try {
+        const bars = await manifest.source.fetchDay(spec.symbol, spec.interval, date);
+        let c = this.caches.get(key);
+        if (!c) {
+          c = { days: new Map(), flat: [] };
+          this.caches.set(key, c);
+        }
+        c.days.set(date, {
+          date,
+          bars: bars.slice().sort((a, b) => a.ts - b.ts),
+          lru: ++this.lruCounter,
+        });
+        this.evictLRU(c);
+        this.rebuildFlat(c);
+      } finally {
+        this.prefetchInflight.delete(inflightKey);
       }
-      cache.days.set(date, {
-        date,
-        bars: bars.slice().sort((a, b) => a.ts - b.ts),
-        lru: ++this.lruCounter,
-      });
-      this.evictLRU(cache);
-      this.rebuildFlat(cache);
-    } finally {
-      this.prefetchInflight.delete(inflightKey);
-    }
+    })();
+    this.prefetchInflight.set(inflightKey, run);
+    return run;
   }
 
   private evictLRU(cache: SeriesCache): void {
@@ -286,13 +467,25 @@ export class ReplayControllerImpl implements ReplayController {
     cache.flat = all;
   }
 
+  /** True when any cached series has a bar strictly after `ts`. */
+  private hasBarAfter(ts: Timestamp): boolean {
+    for (const cache of this.caches.values()) {
+      if (lowerBoundIndex(cache.flat, ts + 1) < cache.flat.length) return true;
+    }
+    return false;
+  }
+
   private findInitialCursor(manifest: ReplayManifest): Timestamp | null {
     let best: Timestamp | null = null;
     for (const spec of this.activeSeries) {
       const cache = this.caches.get(seriesKey(spec));
       if (!cache) continue;
       const idx = lowerBoundIndex(cache.flat, manifest.start);
-      const bar = cache.flat[idx] ?? cache.flat[cache.flat.length - 1];
+      // Manifest start beyond every cached bar (a non-session date): fall back
+      // to the OPEN of the latest cached day — not the last bar, which parked
+      // the cursor at the end of the data so Play had nothing to advance
+      // through.
+      const bar = cache.flat[idx] ?? firstBarOfLatestDay(cache);
       if (!bar) continue;
       if (best == null || bar.ts < best) best = bar.ts;
     }
@@ -314,20 +507,30 @@ export class ReplayControllerImpl implements ReplayController {
   private scheduleTick(): void {
     if (this.state.status !== "ready" || !this.state.playing) return;
     const interval = Math.max(16, BASE_TICK_MS / this.state.speed);
-    this.tickHandle = setTimeout(() => {
+    this.tickHandle = this.scheduler.setTimeout(() => {
       this.tickHandle = null;
-      const advanced = this.advanceCursor(1);
-      if (advanced) this.scheduleTick();
-      else if (this.state.status === "ready") {
-        this.state = { ...this.state, playing: false };
-        this.notify();
+      if (this.advanceCursor(1)) {
+        this.scheduleTick();
+        return;
       }
+      // At the cached tail. At high speeds the cursor can outrun the forward
+      // prefetch (which only arms in the last slice of the day) — await one
+      // prefetch pass and retry before declaring the end, otherwise playback
+      // silently halts at every day boundary.
+      void this.maybePrefetchForward().then(() => {
+        if (this.state.status !== "ready" || !this.state.playing) return;
+        if (this.advanceCursor(1)) this.scheduleTick();
+        else {
+          this.state = { ...this.state, playing: false };
+          this.notify();
+        }
+      });
     }, interval);
   }
 
   private cancelTick(): void {
     if (this.tickHandle != null) {
-      clearTimeout(this.tickHandle);
+      this.scheduler.clearTimeout(this.tickHandle);
       this.tickHandle = null;
     }
   }
@@ -409,7 +612,9 @@ export class ReplayControllerImpl implements ReplayController {
       const after = await manifest.source.listDatesAfter(spec.symbol, spec.interval, cursorDate, 1);
       const nextDate = after[0];
       if (!nextDate || cache.days.has(nextDate)) continue;
-      void this.fetchAndCacheDay(manifest, spec, nextDate);
+      // Awaited so the tail-stall retry in scheduleTick sees the bars once this
+      // resolves.
+      await this.fetchAndCacheDay(manifest, spec, nextDate);
     }
   }
 

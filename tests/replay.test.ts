@@ -81,10 +81,10 @@ describe("ReplayControllerImpl", () => {
     expect(upto[upto.length - 1].close).toBe(102);
   });
 
-  it("clamps speed to [0.1, 64]", () => {
+  it("clamps speed to [0.1, 100]", () => {
     rc.setSpeed(1000);
     let s = rc.getState();
-    if (s.status === "ready") expect(s.speed).toBe(64);
+    if (s.status === "ready") expect(s.speed).toBe(100);
     rc.setSpeed(0);
     s = rc.getState();
     if (s.status === "ready") expect(s.speed).toBe(0.1);

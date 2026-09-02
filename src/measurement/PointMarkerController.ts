@@ -16,6 +16,7 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { ChartPlugin, PluginContext } from "../plugins/types";
+import { ownerWindowOf } from "../dom/ownerWindow";
 import { PointMarkerPrimitive, type PointMarkerColors } from "./PointMarkerPrimitive";
 
 export interface PointMarkerOptions {
@@ -25,8 +26,14 @@ export interface PointMarkerOptions {
   centerOnCatch?: boolean;
   /** Marker color overrides. */
   colors?: Partial<PointMarkerColors>;
-  /** Called whenever the marker moves (epoch ms) or is cleared (`null`). */
-  onCatch?: (ts: number | null) => void;
+  /**
+   * Called whenever the marker moves (epoch ms) or is cleared (`null`).
+   *
+   * `frac` is where the caught point sat horizontally on THIS chart's plot
+   * (0 = left edge, 1 = right edge). Forward it to linked charts so they show
+   * the same instant at the same screen position instead of centring it.
+   */
+  onCatch?: (ts: number | null, frac?: number) => void;
 }
 
 type AnySeries = ISeriesApi<"Candlestick" | "Bar" | "Line" | "Area">;
@@ -44,6 +51,7 @@ export class PointMarkerController implements ChartPlugin {
   private cleanup: Array<() => void> = [];
   private listeners = new Set<(ts: number | null) => void>();
   private last: number | null = null;
+  private lastFrac: number | null = null;
 
   constructor(private readonly opts: PointMarkerOptions = {}) {
     this.marker = new PointMarkerPrimitive(opts.colors);
@@ -62,10 +70,14 @@ export class PointMarkerController implements ChartPlugin {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") this.clear();
     };
+    // The chart element's OWN window: a chart rendered into a second browser
+    // window receives key events THERE only, so binding the module-scope
+    // `window` would go deaf for it.
+    const win = ownerWindowOf(el);
     el.addEventListener("click", onClick, { capture: true });
-    window.addEventListener("keydown", onKey);
+    win.addEventListener("keydown", onKey);
     this.cleanup.push(() => el.removeEventListener("click", onClick, { capture: true } as EventListenerOptions));
-    this.cleanup.push(() => window.removeEventListener("keydown", onKey));
+    this.cleanup.push(() => win.removeEventListener("keydown", onKey));
   }
 
   destroy(): void {
@@ -110,21 +122,33 @@ export class PointMarkerController implements ChartPlugin {
   }
 
   /**
+   * Fractional plot-x (0..1) the current marker was caught at on this chart, or
+   * `null` when it was placed programmatically without one.
+   */
+  getFraction(): number | null {
+    return this.lastFrac;
+  }
+
+  /**
    * Place (or move) the marker at `ts` (epoch ms). Pass `null` to clear. This is
    * the programmatic entry a host uses to mirror a sibling chart's caught point;
    * it does NOT re-emit `onCatch`/bus (no broadcast loop) but does notify local
    * `subscribe` listeners so UI stays in sync.
    */
-  setPoint(ts: number | null, options: { center?: boolean } = {}): void {
+  setPoint(ts: number | null, options: { center?: boolean; frac?: number } = {}): void {
     if (ts == null) {
       this.marker.clear();
       this.last = null;
+      this.lastFrac = null;
       for (const cb of this.listeners) cb(null);
       return;
     }
     this.marker.set(ts / MS);
-    if (options.center ?? this.opts.centerOnCatch ?? true) this.centerOn(ts / MS);
+    if (options.center ?? this.opts.centerOnCatch ?? true) {
+      this.placeAtFraction(ts / MS, options.frac ?? 0.5);
+    }
     this.last = ts;
+    this.lastFrac = options.frac ?? null;
     for (const cb of this.listeners) cb(ts);
   }
 
@@ -135,14 +159,20 @@ export class PointMarkerController implements ChartPlugin {
     this.emit(null);
   }
 
-  private emit(ts: number | null): void {
+  private emit(ts: number | null, frac?: number): void {
     this.last = ts;
-    this.opts.onCatch?.(ts);
+    this.lastFrac = frac ?? null;
+    this.opts.onCatch?.(ts, frac);
     for (const cb of this.listeners) cb(ts);
     this.ctx?.bus.emit("pointMarker" as never, ts as never);
   }
 
-  private centerOn(tsSec: number): void {
+  /**
+   * Shift the viewport so `tsSec` lands at `frac` of the plot width (0 = left
+   * edge, 1 = right edge), keeping the logical width — i.e. the zoom — exactly.
+   * `0.5` is "centre on it".
+   */
+  private placeAtFraction(tsSec: number, frac: number): void {
     const chart = this.chart;
     if (!chart) return;
     const scale = chart.timeScale();
@@ -152,15 +182,19 @@ export class PointMarkerController implements ChartPlugin {
       const tl = scale.coordinateToLogical(x);
       if (tl != null) {
         const width = lr.to - lr.from;
-        scale.setVisibleLogicalRange({ from: tl - width / 2, to: tl + width / 2 });
+        const from = tl - frac * width;
+        scale.setVisibleLogicalRange({ from, to: from + width });
         return;
       }
     }
     const vr = scale.getVisibleRange();
     if (vr) {
-      const span = (Number(vr.to) - Number(vr.from)) / 2;
+      const span = Number(vr.to) - Number(vr.from);
       try {
-        scale.setVisibleRange({ from: (tsSec - span) as Time, to: (tsSec + span) as Time });
+        scale.setVisibleRange({
+          from: (tsSec - frac * span) as Time,
+          to: (tsSec + (1 - frac) * span) as Time,
+        });
       } catch {
         /* out of bounds */
       }
@@ -189,8 +223,14 @@ export class PointMarkerController implements ChartPlugin {
       }
     }
 
+    // Where the click landed across the plot, so linked charts can mirror the
+    // screen position and not just the instant.
+    const plotW = scale.width();
+    const catchX = scale.timeToCoordinate(t);
+    const frac = catchX != null && plotW > 0 ? Math.min(1, Math.max(0, catchX / plotW)) : 0.5;
+
     this.marker.set(tsSec);
-    if (this.opts.centerOnCatch ?? true) this.centerOn(tsSec);
-    this.emit(tsSec * MS);
+    if (this.opts.centerOnCatch ?? true) this.placeAtFraction(tsSec, frac);
+    this.emit(tsSec * MS, frac);
   }
 }

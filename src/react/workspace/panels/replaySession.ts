@@ -4,14 +4,20 @@
  * Both the per-pane replay toggle (ChartPanel) and the standalone ReplayPanel
  * scrub the same kind of synthetic intraday session. These helpers build a
  * day-addressable ReplayDataSource over a pane's synthetic bars, the quick-jump
- * markers for the transport, and the IST-as-UTC clock formatter — kept in one
+ * markers for the transport, and the wall-clock formatter — kept in one
  * place so the two panels can't drift apart.
  */
 
 import { toBars, type ReplayDataSource } from "../../index";
 import type { RawBar } from "../../../core/data";
 
-/** Synthetic intraday session anchor (fake-UTC ms — the IST-as-UTC convention). */
+/**
+ * Synthetic intraday session anchor, in epoch ms.
+ *
+ * Offset-shifted data (see `applyFixedOffset`) renders its wall clock through
+ * the UTC accessors, so this anchor and {@link fmtClock} read the same way for
+ * a UTC feed and for a fixed-offset venue alike.
+ */
 export const SESSION_START = Date.UTC(2024, 0, 2, 9, 30);
 
 /** Stable empty array — feeding this as ChartView `data` hands the pane to the
@@ -70,7 +76,7 @@ export function buildJumps(start: number, end: number): { label: string; ts: num
   return out;
 }
 
-/** Fake-UTC ts → wall clock (matches the chart's IST-as-UTC convention). */
+/** Epoch ms → wall clock, read from the UTC components (see SESSION_START). */
 export function fmtClock(ts: number): string {
   const d = new Date(ts);
   const p = (n: number) => String(n).padStart(2, "0");

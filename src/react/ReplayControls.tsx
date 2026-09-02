@@ -57,6 +57,19 @@ export function ReplayControls({
         <span className={`ck-replay-badge ck-replay-badge--${status}`}>{badge}</span>
       </div>
 
+      {/* A materializing session with nothing behind it is indistinguishable
+          from a stuck one — surface what the controller reports it is waiting
+          on (optional: controllers that omit `progress` fall back to the plain
+          LOADING badge). */}
+      {status === "loading" && state.progress && (
+        <div className="ck-replay-progress">
+          <span className="ck-replay-progress-step">{state.progress.step}</span>
+          <span className="ck-replay-progress-count">
+            {state.progress.done}/{state.progress.total}
+          </span>
+        </div>
+      )}
+
       {showProgress && ready && (
         <div className="ck-replay-clock">
           <div className="ck-replay-time">{formatTime(cursor)}</div>

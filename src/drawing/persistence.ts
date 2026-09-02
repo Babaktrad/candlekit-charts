@@ -2,31 +2,16 @@
  * Drawing persistence helpers. Storage-agnostic via a tiny KV interface so
  * drawings can live in localStorage, a remote store, or anywhere else. A
  * localStorage adapter is provided for the common browser case.
+ *
+ * `KVStore` / `localStorageKV` themselves live in `dom/kv` so the indicator
+ * controller can persist through the same backend, and are re-exported here
+ * unchanged — the package exports the same two names it always did.
  */
 
+import { localStorageKV, type KVStore } from "../dom/kv";
 import type { DrawingEngine } from "./DrawingEngine";
 
-export interface KVStore {
-  get(key: string): string | null;
-  set(key: string, value: string): void;
-}
-
-export const localStorageKV: KVStore = {
-  get(key) {
-    try {
-      return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
-    } catch {
-      return null;
-    }
-  },
-  set(key, value) {
-    try {
-      if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
-    } catch {
-      /* quota / unavailable */
-    }
-  },
-};
+export { localStorageKV, type KVStore };
 
 export function saveDrawings(engine: DrawingEngine, key: string, kv: KVStore = localStorageKV): void {
   kv.set(key, engine.export());

@@ -57,6 +57,10 @@
   border-bottom: 1px solid color-mix(in srgb, var(--ck-border) 60%, transparent);
   border-radius: 0 0 8px 0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+  /* Never taller than the chart host: a short panel would otherwise overflow
+   * its container and force the whole pane scrollable. */
+  max-height: 100%;
+  overflow-y: auto;
 }
 /* Thin divider between tool groups (line tools · shapes · fib). */
 .ck-toolbar-sep {
@@ -125,6 +129,11 @@
 }
 .ck-ind-trigger:hover {
   border-color: var(--ck-accent);
+}
+.ck-ind-trigger--icon {
+  width: 24px;
+  justify-content: center;
+  padding: 0;
 }
 .ck-ind-trigger-icon {
   font-style: italic;
@@ -414,11 +423,13 @@
   padding: 6px 10px;
   font-family: inherit;
   color: var(--ck-muted);
-  background: var(--ck-bg);
-  backdrop-filter: blur(6px);
+  /* See-through: the readout sits ON the chart while the ruler is armed, so the
+   * bars behind it have to stay readable. An opaque card with a drop shadow
+   * hides exactly the candles being measured. */
+  background: color-mix(in srgb, var(--ck-bg) 30%, transparent);
+  backdrop-filter: blur(1px);
   border: 1px solid var(--ck-border);
   border-radius: var(--ck-radius);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 }
 .ck-measure--up {
   border-color: color-mix(in srgb, var(--ck-up) 40%, transparent);
@@ -450,6 +461,149 @@
 .ck-measure-meta {
   font-size: 11px;
   color: var(--ck-muted);
+}
+
+/* ── Chart context menu ────────────────────────────────────── */
+/* Fixed-positioned: the menu is placed at the pointer's viewport coordinates,
+ * so it is not clipped by the chart container's overflow. */
+.ck-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 190px;
+  overflow: hidden;
+  padding: 4px 0;
+  border: 1px solid var(--ck-border);
+  border-radius: var(--ck-radius);
+  background: var(--ck-bg);
+  backdrop-filter: blur(6px);
+  color: var(--ck-fg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  font-size: 12px;
+}
+.ck-menu-head {
+  padding: 4px 12px 6px;
+  border-bottom: 1px solid var(--ck-border);
+  margin-bottom: 4px;
+  color: var(--ck-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.ck-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ck-menu-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ck-accent) 16%, transparent);
+}
+.ck-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ck-menu-item--danger {
+  color: var(--ck-down);
+}
+.ck-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--ck-border);
+}
+.ck-menu-styles {
+  display: flex;
+  gap: 4px;
+  padding: 4px 12px;
+}
+.ck-menu-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid var(--ck-border);
+  cursor: pointer;
+  padding: 0;
+}
+.ck-menu-swatch--on {
+  outline: 2px solid var(--ck-accent);
+  outline-offset: 1px;
+}
+.ck-menu-width {
+  min-width: 20px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid var(--ck-border);
+  background: transparent;
+  color: var(--ck-muted);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.ck-menu-width--on {
+  border-color: var(--ck-accent);
+  color: var(--ck-accent);
+}
+
+/* ── Indicator legend ───────────────────────────────────────── */
+/* Top-left readout under the toolbar. Never intercepts pointer events — the
+ * chart keeps every drag / crosshair / click underneath it. */
+.ck-legend {
+  position: absolute;
+  top: 8px;
+  left: 44px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: calc(100% - 110px);
+  padding: 3px 6px;
+  border: 1px solid var(--ck-border);
+  border-radius: var(--ck-radius);
+  background: var(--ck-bg);
+  backdrop-filter: blur(2px);
+  font-size: 11px;
+  line-height: 1.1;
+  pointer-events: none;
+  user-select: none;
+}
+.ck-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ck-legend-name {
+  color: var(--ck-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.ck-legend-plot {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ck-legend-plot-title {
+  color: var(--ck-muted);
+  font-size: 9px;
+  opacity: 0.8;
+}
+.ck-legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+.ck-legend-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 3ch;
+  display: inline-block;
 }
 
 /* ── Replay panel ──────────────────────────────────────────────────────────── */
@@ -597,6 +751,22 @@
 .ck-replay-error {
   color: var(--ck-down);
   font-size: 11px;
+}
+.ck-replay-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ck-muted);
+}
+.ck-replay-progress-step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ck-replay-progress-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Lab: Sketch Search + Echoes ───────────────────────────────────────────── */

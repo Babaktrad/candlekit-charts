@@ -26,6 +26,8 @@ export interface ChartEventMap {
   replayCursor: { ts: number };
   /** A point marker was caught (epoch ms) or cleared (`null`). */
   pointMarker: number | null;
+  /** The measurement ruler armed (`true`) or finished/cleared (`false`). */
+  measureArmed: boolean;
   [key: string]: unknown;
 }
 

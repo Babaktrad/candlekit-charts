@@ -35,6 +35,13 @@ export interface PanelDefinition<TConfig extends PanelConfig = PanelConfig> {
   displayName?: string;
   /** Schema version for future migrations. */
   configVersion?: number;
+  /**
+   * Keep out of the Add-Panel menu while staying resolvable by the factory.
+   * For legacy `kind` aliases: a panel that was split up or renamed still has
+   * to render in workspaces saved before the change, but must not offer itself
+   * as a duplicate entry to new users.
+   */
+  hidden?: boolean;
 }
 
 export interface PanelRegistry {

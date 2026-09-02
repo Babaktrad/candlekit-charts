@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { ownerWindowOf } from "../dom/ownerWindow";
 
 export interface SplitPaneProps {
   /** `horizontal` = side-by-side (vertical gutter); `vertical` = stacked. */
@@ -61,14 +62,18 @@ export function SplitPane({
       e.preventDefault();
       dragging.current = true;
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      // The splitter's OWN window: a pane rendered into a second browser window
+      // delivers pointer events THERE only, and a missed pointerup would leave
+      // the drag latched forever.
+      const win = ownerWindowOf(e.target as Node);
       const move = (ev: PointerEvent) => dragging.current && onMove(ev.clientX, ev.clientY);
       const up = () => {
         dragging.current = false;
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
+        win.removeEventListener("pointermove", move);
+        win.removeEventListener("pointerup", up);
       };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
+      win.addEventListener("pointermove", move);
+      win.addEventListener("pointerup", up);
     },
     [onMove],
   );

@@ -21,6 +21,104 @@ to [Semantic Versioning](https://semver.org/).
   keyed by `PlotConfig.id`); new `IndicatorController.setColors(name, colors)`
   re-styles live series in place without recomputing. The React `<IndicatorPicker>`
   shows a color swatch per plot for active indicators (minor — additive API).
+- **Live-edge follower** — `attachLiveEdgeFollower(chart, series, opts)` plus the
+  pure `liveEdgeFollowRange` / `liveGutterBars` keep the newest bar in frame as
+  live bars append, without ever pulling a user who scrolled into history
+  forward. Append-only, at-the-edge-only, shift-relative (zoom and gutter are
+  preserved bar-for-bar); a jump larger than `maxAppendSlots` is treated as a
+  data reload and ignored. Wired through the new `<ChartView followLiveEdge>`
+  prop. `ChartController`'s default `rightOffset` moves 5 → 10 so a forming
+  candle is never flush against the price axis.
+- **`liveBucketMs(tickMs, intervalMinutes, opts)`** — buckets a live tick to the
+  start of the candle its interval owns, honouring `sessionOpenMinutes`. Using a
+  plain minute floor on a 5m/15m chart spawns a new one-minute bar every minute
+  instead of growing the bucket that is forming.
+- **Replay: driver series, injectable scheduler, load progress.** A coarse
+  intraday series now also materializes a finer driver series
+  (`minuteDrivers` / `driverInterval`, default `1m`), so the cursor advances one
+  driver bar at a time and `getBarsUpToCursor` returns the newest coarse bar
+  *forming* rather than printed complete. `ReplayEngineOptions.scheduler`
+  (`ReplayScheduler`) replaces the built-in timers, so a background-throttled
+  document cannot slow playback. `ReplayState.loading` gains an optional
+  `progress { startedAt, done, total, step }`, surfaced by `<ReplayControls>`.
+  Also fixed: an in-flight day fetch is now *joined* rather than dropped;
+  playback awaits one forward-prefetch pass before declaring the end (it used to
+  halt at day boundaries at high speed); a manifest start with no bars falls back
+  to the open of the latest cached day instead of parking at the end of the data;
+  Play at the cached tail restarts the session instead of no-oping; the two
+  "no bars" failures now report distinguishable messages. **Behaviour change:**
+  `setSpeed` clamps to `[0.1, 100]` (was `[0.1, 64]`).
+- **Sticky measurement ruler.** A press-and-release *click* now leaves the ruler
+  armed and tracking the pointer with the button up (releasing the modifier no
+  longer cancels it); the next click freezes it, a further click dismisses it. A
+  *drag* still finishes on release. `MeasurementOptions` gains `onArmedChange`
+  and `sticky` (default `true`, pass `false` for the old drag-only behaviour),
+  `MeasurementController.isArmed()`, and a `measureArmed` chart-bus event.
+  `<ChartView>` locks the drawing engine while armed so the click that finalises
+  a ruler cannot grab a drawing underneath it.
+- **`CrosshairMarkerPrimitive`** — a vertical guide for mirroring a crosshair
+  across linked charts. Unlike `setCrosshairPosition` it renders regardless of
+  the receiving chart's data coverage, and its x is interpolated gap-aware
+  between bracketing bars (exported separately as `interpolateCoordinate`) so it
+  stays correct across charts of different bar densities.
+- **Point marker: fractional placement.** `SyncEvent<"pointMarker">` gains
+  `frac` (0 = left plot edge, 1 = right), `PointMarkerController.setPoint`
+  accepts `{ frac }`, `onCatch` reports it, and `getFraction()` reads it back —
+  so linked charts show the caught instant at the same *screen position*, not
+  merely centred.
+- **Indicator legend + value scanning.** `IndicatorController` gains
+  `legendEntries()`, `valuesAt(tsMs | null)` (resolved from its own plot series,
+  so it works for a programmatically-positioned crosshair, which
+  lightweight-charts reports no series values for) and `subscribe()`. New React
+  `<IndicatorLegend>` renders the readout, writing per-bar numbers straight to
+  the DOM off the crosshair path. Also new: `lineToIndicatorBars()` to run
+  close-sourced indicators over a plain value line, and `paneKeyRegistry`
+  (`indicatorPaneKeys`, `PRIMARY_PANE_KEY`, `paneKeyOf`) mapping an oscillator
+  series to its pane.
+- **Indicator persistence** — `IndicatorControllerOptions` gains
+  `storageKey` / `kv`, mirroring `DrawingController`: the active set is restored
+  on `init` and saved on every mutation. Unknown names and corrupt payloads
+  degrade to an empty set.
+- **`<ChartContextMenu>`** — right-click menu acting on what is under the cursor:
+  clone / restyle / delete the selected drawing, remove an active indicator, plus
+  caller-supplied `extraItems` so a host can add its own actions without the
+  library knowing what they are. Opens only when it has something to offer.
+- **Multi-window (detached panel) support.** New `ownerWindowOf` /
+  `ownerDocumentOf`; every window-level listener in the package
+  (`DrawingController`, `MeasurementController`, `PointMarkerController`,
+  `SketchSearchController`, `SplitPane`, `IndicatorPicker`) now binds to the
+  chart's *own* window instead of the module-scope one, so a chart rendered into
+  a second browser window no longer goes deaf to `mouseup` / `keydown`. In
+  `/react/workspace`: `PanelWindowProvider` + `usePanelWindow` /
+  `usePanelDocument` / `usePortalContainer` / `useIsDetachedPanel`, the
+  `detachLayout` helpers (`WORKSPACE_GLOBAL_ATTRS`, `TAB_MULTI_WINDOW_ATTRS`,
+  `stampTabAttributes`, `withWorkspaceGlobals`, `splitSubLayouts`,
+  `withSubLayouts`), and a `FlexLayoutAdapter` `DetachApi`
+  (`detachPanel` / `reattachAll` / `pendingDetachedCount` / `restoreDetached`)
+  behind `supportsDetach` / `detachUrl` / `onDetachApi`. Detached windows are
+  parked out of the hydrated model — rehydrating them means a synchronous
+  `window.open`, which popup blockers reject outside a gesture — and merged back
+  into every save so the arrangement is never silently lost.
+- **`PanelDefinition.hidden`** — keeps a legacy `kind` alias resolvable by the
+  panel factory while leaving it out of the Add-Panel menu.
+- **`useChartTheme(overrides?)`** — the resolved `ChartTheme` for the document's
+  current light/dark mode, so several chart hosts on one page cannot drift apart.
+- **`<IndicatorPicker iconOnly>`** for tight chrome. Its numeric param inputs now
+  keep local text state, so clearing a field or typing `0.` on the way to `0.5`
+  is no longer reverted by the NaN guard, and `min` / `max` / `step` from
+  `InputConfig` are honoured.
+- `KVStore` / `localStorageKV` moved to `dom/kv` so the indicator controller can
+  share the drawing backend. Both are still re-exported from their original
+  module — no change to the public surface.
+
+### Changed
+
+- `ReplayController.setSpeed` now clamps to **100x** (was 64x). Widening only —
+  every previously accepted speed still behaves identically. The higher ceiling
+  matches the playback loop the coalescing back-pressure rewrite was measured
+  against, where the cursor holds until the previous read settles and skipped
+  steps are counted rather than queued, so the controller no longer degrades
+  into an unbounded fetch backlog at high speed.
 
 ## [0.1.0] — Unreleased
 

@@ -18,8 +18,31 @@ export { usePanel, type UsePanelResult } from "./hooks/usePanel";
 export { useLayout, type UseLayoutResult } from "./hooks/useLayout";
 
 // FlexLayout adapter
-export { FlexLayoutAdapter, type FlexLayoutAdapterProps } from "./flexlayout/FlexLayoutAdapter";
+export {
+  FlexLayoutAdapter,
+  type FlexLayoutAdapterProps,
+  type DetachApi,
+} from "./flexlayout/FlexLayoutAdapter";
 export { createModelFromJson, modelToJson } from "./flexlayout/ModelFactory";
+
+// Multi-window (detached panel) support
+export {
+  PanelWindowProvider,
+  type PanelWindowProviderProps,
+  usePanelWindow,
+  usePanelDocument,
+  usePortalContainer,
+  useIsDetachedPanel,
+} from "./PanelWindowContext";
+export {
+  WORKSPACE_GLOBAL_ATTRS,
+  TAB_MULTI_WINDOW_ATTRS,
+  stampTabAttributes,
+  withWorkspaceGlobals,
+  splitSubLayouts,
+  withSubLayouts,
+  type SubLayouts,
+} from "./detachLayout";
 
 // Built-in panels
 export { ChartPanel, type ChartPanelConfig, DEFAULT_CHART_CONFIG } from "./panels/ChartPanel";

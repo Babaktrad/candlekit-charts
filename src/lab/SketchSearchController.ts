@@ -11,6 +11,7 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { ChartPlugin, PluginContext } from "../plugins/types";
+import { ownerWindowOf } from "../dom/ownerWindow";
 import { findSimilar, resampleStroke } from "./similarity";
 import type { StrokePoint } from "./types";
 import { MatchHighlightPrimitive, type MatchHighlightColors } from "./MatchHighlightPrimitive";
@@ -99,14 +100,18 @@ export class SketchSearchController implements ChartPlugin {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") this.clear();
     };
+    // The chart element's OWN window — a chart rendered into a second browser
+    // window delivers these events THERE only, and a missed mouseup would leave
+    // the sketch drag latched.
+    const win = ownerWindowOf(el);
     el.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    window.addEventListener("keydown", onKey);
+    win.addEventListener("mousemove", onMove);
+    win.addEventListener("mouseup", onUp);
+    win.addEventListener("keydown", onKey);
     this.cleanup.push(() => el.removeEventListener("mousedown", onDown));
-    this.cleanup.push(() => window.removeEventListener("mousemove", onMove));
-    this.cleanup.push(() => window.removeEventListener("mouseup", onUp));
-    this.cleanup.push(() => window.removeEventListener("keydown", onKey));
+    this.cleanup.push(() => win.removeEventListener("mousemove", onMove));
+    this.cleanup.push(() => win.removeEventListener("mouseup", onUp));
+    this.cleanup.push(() => win.removeEventListener("keydown", onKey));
   }
 
   destroy(): void {

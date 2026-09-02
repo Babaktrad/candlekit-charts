@@ -36,11 +36,19 @@ export type SyncEvent =
   | {
       /**
        * A "catch point" marker. Receivers drop a marker at `ts` (epoch ms) and
-       * recenter on it while preserving their own bar spacing. `null` clears the
-       * marker across the group.
+       * shift their viewport so the point lands at the same fractional screen-x
+       * as on the source (`frac`), preserving their own bar spacing. `null`
+       * clears the marker across the group.
        */
       kind: "pointMarker";
       ts: Timestamp | null;
+      /**
+       * Fractional x position (0 = left edge of the plot, 1 = right edge) where
+       * the point sits on the SOURCE chart. Receivers place it at the same
+       * fraction so every chart shows the instant at the same screen position.
+       * Absent → receivers centre it (0.5).
+       */
+      frac?: number;
       sourcePanelId: ChartId | null;
     };
 

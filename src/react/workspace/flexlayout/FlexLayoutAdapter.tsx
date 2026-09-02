@@ -30,7 +30,39 @@ import {
 import type { PanelDefinition, PanelInstance, WorkspaceManager } from "../../../workspace";
 import { createModelFromJson, modelToJson } from "./ModelFactory";
 import { WorkspaceProvider } from "../WorkspaceProvider";
+import { PanelWindowProvider } from "../PanelWindowContext";
+import {
+  splitSubLayouts,
+  withSubLayouts,
+  withWorkspaceGlobals,
+  TAB_MULTI_WINDOW_ATTRS,
+  type SubLayouts,
+} from "../detachLayout";
 import { useWorkspace } from "../hooks/useWorkspace";
+
+/** Blank same-origin document FlexLayout opens for each detached panel. */
+const DEFAULT_DETACH_URL = "popout.html";
+
+/**
+ * Imperative handle for detaching panels into their own OS windows.
+ *
+ * Every entry that ends in `window.open` MUST be called from a user gesture —
+ * popup blockers reject anything else, and a blocked open silently costs the
+ * user their arrangement.
+ */
+export interface DetachApi {
+  /** Detach a panel into its own OS window. False when it is not in the tree. */
+  detachPanel(panelId: string): boolean;
+  /** Dock every detached window back into the main layout. */
+  reattachAll(): void;
+  /**
+   * Detached windows present in the saved layout but not yet reopened. Non-zero
+   * means the UI should offer a restore button.
+   */
+  pendingDetachedCount(): number;
+  /** Reopen the saved detached windows. No-op when nothing is pending. */
+  restoreDetached(): void;
+}
 
 export interface FlexLayoutAdapterProps {
   workspace: WorkspaceManager;
@@ -41,6 +73,19 @@ export interface FlexLayoutAdapterProps {
   hideToolbar?: boolean;
   /** Called when the adapter has mounted and registered its driver. */
   onReady?: () => void;
+  /**
+   * Allow panels to be detached into separate OS windows (multi-monitor).
+   * Defaults to whether the host can open a window at all.
+   */
+  supportsDetach?: boolean;
+  /**
+   * URL FlexLayout opens for each detached window: a blank same-origin page
+   * that loads your stylesheet. The panel is portalled into it. Default
+   * `"popout.html"`.
+   */
+  detachUrl?: string;
+  /** Receives the detach handle once the adapter has mounted. */
+  onDetachApi?: (api: DetachApi) => void;
 }
 
 export function FlexLayoutAdapter({
@@ -49,6 +94,9 @@ export function FlexLayoutAdapter({
   toolbar,
   hideToolbar,
   onReady,
+  supportsDetach,
+  detachUrl,
+  onDetachApi,
 }: FlexLayoutAdapterProps) {
   return (
     <WorkspaceProvider workspace={workspace}>
@@ -57,6 +105,9 @@ export function FlexLayoutAdapter({
         toolbar={toolbar}
         hideToolbar={hideToolbar}
         onReady={onReady}
+        supportsDetach={supportsDetach}
+        detachUrl={detachUrl}
+        onDetachApi={onDetachApi}
       />
     </WorkspaceProvider>
   );
@@ -69,11 +120,17 @@ function FlexLayoutAdapterInner({
   toolbar,
   hideToolbar,
   onReady,
+  supportsDetach,
+  detachUrl = DEFAULT_DETACH_URL,
+  onDetachApi,
 }: {
   className?: string;
   toolbar?: ReactNode;
   hideToolbar?: boolean;
   onReady?: () => void;
+  supportsDetach?: boolean;
+  detachUrl?: string;
+  onDetachApi?: (api: DetachApi) => void;
 }) {
   const workspace = useWorkspace();
   const [model, setModel] = useState<Model | null>(null);
@@ -85,9 +142,22 @@ function FlexLayoutAdapterInner({
 
   const factory = useMemo(() => makePanelFactory(workspace), [workspace]);
 
-  const hydrate = useCallback((json: IJsonModel) => {
+  // Detached windows parked out of the live model until a gesture reopens them
+  // (see splitSubLayouts — rehydrating them calls window.open synchronously).
+  const pendingDetached = useRef<SubLayouts>({});
+
+  /**
+   * @param openDetached true only on a gesture-initiated restore — hydrating
+   *   with sub-layouts present makes FlexLayout call `window.open` immediately.
+   */
+  const hydrate = useCallback((json: IJsonModel, openDetached = false) => {
+    const withGlobals = withWorkspaceGlobals(json);
+    const { stripped, detached } = openDetached
+      ? { stripped: withGlobals, detached: {} as SubLayouts }
+      : splitSubLayouts(withGlobals);
+    pendingDetached.current = detached;
     try {
-      setModel(createModelFromJson(json));
+      setModel(createModelFromJson(stripped));
     } catch (e) {
       console.warn("FlexLayoutAdapter: failed to hydrate layout", e);
       // Fallback to empty model so the UI doesn't crash.
@@ -95,12 +165,22 @@ function FlexLayoutAdapterInner({
     }
   }, []);
 
+  /**
+   * The live tree plus any detached windows we deferred. EVERYTHING that
+   * serializes the workspace goes through this, or a user who has not clicked
+   * "restore" yet has their detached arrangement overwritten on the next save.
+   */
+  const treeWithPending = useCallback(
+    (m: Model) => withSubLayouts(modelToJson(m) as IJsonModel, pendingDetached.current),
+    [],
+  );
+
   // Register driver + initial hydrate.
   useEffect(() => {
     let cancelled = false;
 
     const unregister = (workspace as unknown as { _registerDriver: (d: unknown) => () => void })._registerDriver({
-      getTree: () => (modelRef.current ? modelToJson(modelRef.current) : {}),
+      getTree: () => (modelRef.current ? treeWithPending(modelRef.current) : {}),
       setTree: (tree: unknown) => {
         if (!cancelled) hydrate(tree as IJsonModel);
       },
@@ -123,7 +203,37 @@ function FlexLayoutAdapterInner({
       cancelled = true;
       unregister();
     };
-  }, [workspace, hydrate, onReady]);
+  }, [workspace, hydrate, treeWithPending, onReady]);
+
+  // Detach handle. Published once; the closures read live refs.
+  useEffect(() => {
+    if (!onDetachApi) return;
+    onDetachApi({
+      detachPanel: (panelId) => {
+        const m = modelRef.current;
+        if (!m || !m.getNodeById(panelId)) return false;
+        // "window" = a real OS window (movable to another monitor), as opposed
+        // to "float" (a simulated div that cannot leave this window).
+        m.doAction(Actions.popoutTab(panelId, "window"));
+        return true;
+      },
+      reattachAll: () => {
+        const m = modelRef.current;
+        if (!m) return;
+        const json = modelToJson(m) as IJsonModel;
+        for (const id of Object.keys(json.subLayouts ?? {})) m.doAction(Actions.closePopout(id));
+        // Also drop anything still parked — the user asked for everything docked.
+        pendingDetached.current = {};
+      },
+      pendingDetachedCount: () => Object.keys(pendingDetached.current).length,
+      restoreDetached: () => {
+        const m = modelRef.current;
+        const pending = pendingDetached.current;
+        if (!m || Object.keys(pending).length === 0) return;
+        hydrate({ ...(modelToJson(m) as IJsonModel), subLayouts: pending }, /* openDetached */ true);
+      },
+    });
+  }, [onDetachApi, hydrate]);
 
   // Debounced autosave.
   const onModelChange = useMemo(() => (m: Model) => {
@@ -131,11 +241,15 @@ function FlexLayoutAdapterInner({
     saveTimer.current = window.setTimeout(() => {
       const panels = extractPanelsFromModel(m);
       (workspace as unknown as { _onTreeChanged: (tree: unknown, panels: unknown) => void })._onTreeChanged(
-        modelToJson(m),
+        treeWithPending(m),
         panels,
       );
     }, 400);
-  }, [workspace]);
+  }, [workspace, treeWithPending]);
+
+  const canDetach =
+    supportsDetach ??
+    (typeof window !== "undefined" && typeof window.open === "function");
 
   if (!model) {
     return <div className={className} style={{ height: "100%" }} />;
@@ -190,6 +304,11 @@ function FlexLayoutAdapterInner({
           factory={factory}
           onModelChange={onModelChange}
           realtimeResize
+          // ── Detach into a separate OS window (multi-monitor) ───────────────
+          // Left undefined, FlexLayout guesses from the user agent; gate on the
+          // capability itself instead.
+          supportsPopout={canDetach}
+          popoutURL={detachUrl}
         />
       </div>
     </div>
@@ -204,6 +323,10 @@ function makePanelFactory(workspace: WorkspaceManager) {
 
 function PanelHostMount({ node, workspace }: { node: TabNode; workspace: WorkspaceManager }) {
   const panelId = node.getId();
+  // The window this tab actually renders into: the main one while docked, the
+  // popped-out one once detached. Re-read on every render because a detach
+  // remounts the tab (see TAB_MULTI_WINDOW_ATTRS).
+  const [panelWindow, setPanelWindow] = useState<Window | null>(null);
   const kind = node.getComponent() ?? "unknown";
   const def = workspace.registry.get(kind);
   const [, bump] = useReducer((n: number) => n + 1, 0);
@@ -238,20 +361,36 @@ function PanelHostMount({ node, workspace }: { node: TabNode; workspace: Workspa
     [node, panelId, kind, def],
   );
 
-  if (!def) {
-    return (
-      <div style={{ padding: 16, fontSize: 12, color: "var(--app-muted)" }}>
-        Unknown panel kind: <code>{kind}</code>
-      </div>
-    );
-  }
+  const Component = def?.component as
+    | React.ComponentType<{
+        instance: PanelInstance;
+        updateConfig: (next: Partial<Record<string, unknown>>) => void;
+      }>
+    | undefined;
 
-  const Component = def.component as React.ComponentType<{
-    instance: PanelInstance;
-    updateConfig: (next: Partial<Record<string, unknown>>) => void;
-  }>;
-
-  return <Component instance={instance} updateConfig={updateConfig} />;
+  return (
+    // A host element the subtree can resolve its own window from — after a
+    // detach the panel lives in another document, and everything that reads a
+    // viewport global (portal containers, listeners, devicePixelRatio) must use
+    // THAT window, not the module-scope one.
+    <div
+      ref={(el) => {
+        const win = (el?.ownerDocument?.defaultView as Window | null) ?? null;
+        setPanelWindow((prev) => (prev === win ? prev : win));
+      }}
+      style={{ position: "relative", width: "100%", height: "100%", minHeight: 0 }}
+    >
+      <PanelWindowProvider window={panelWindow ?? (globalThis as unknown as { window: Window }).window}>
+        {Component ? (
+          <Component instance={instance} updateConfig={updateConfig} />
+        ) : (
+          <div style={{ padding: 16, fontSize: 12, color: "var(--app-muted)" }}>
+            Unknown panel kind: <code>{kind}</code>
+          </div>
+        )}
+      </PanelWindowProvider>
+    </div>
+  );
 }
 
 // ── Add panel button ─────────────────────────────────────────────────────────
@@ -264,7 +403,9 @@ function AddPanelButton({
   modelRef: React.MutableRefObject<Model | null>;
 }) {
   const [open, setOpen] = useState(false);
-  const defs = workspace.registry.list();
+  // `hidden` defs (legacy kind aliases) stay resolvable by the factory but must
+  // not show up as duplicate entries in the picker.
+  const defs = workspace.registry.list().filter((d) => !d.hidden);
 
   const handleAdd = useCallback(
     (def: PanelDefinition) => {
@@ -351,7 +492,16 @@ function addPanelToModel(
 
   model.doAction(
     Actions.addNode(
-      { id, type: "tab", name: title, component: kind, config: instance },
+      {
+        id,
+        type: "tab",
+        name: title,
+        component: kind,
+        config: instance,
+        // Tabs added after hydrate miss the stamping pass, so carry the detach
+        // attributes here too (see TAB_MULTI_WINDOW_ATTRS).
+        ...TAB_MULTI_WINDOW_ATTRS,
+      },
       targetId,
       DockLocation.CENTER,
       -1,

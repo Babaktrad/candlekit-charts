@@ -12,6 +12,7 @@
 
 import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
 import type { ChartPlugin, PluginContext } from "../plugins/types";
+import { ownerWindowOf } from "../dom/ownerWindow";
 import { DrawingEngine } from "./DrawingEngine";
 import { DrawingPrimitive } from "./DrawingPrimitive";
 import { localStorageKV, saveDrawings, loadDrawings, type KVStore } from "./persistence";
@@ -74,14 +75,19 @@ export class DrawingController implements ChartPlugin {
     const move = (e: MouseEvent) => this.onMove(e);
     const up = () => this.onUp();
     const key = (e: KeyboardEvent) => this.onKey(e);
+    // The chart element's OWN window. A chart rendered into a second browser
+    // window (a detached panel, a popout) receives mouseup / keydown THERE
+    // only: binding the module-scope `window` would leave a drag latched and
+    // kill Escape / Delete for every drawing in that window.
+    const win = ownerWindowOf(el);
     el.addEventListener("mousedown", down, true);
     el.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-    window.addEventListener("keydown", key);
+    win.addEventListener("mouseup", up);
+    win.addEventListener("keydown", key);
     this.cleanup.push(() => el.removeEventListener("mousedown", down, true));
     this.cleanup.push(() => el.removeEventListener("mousemove", move));
-    this.cleanup.push(() => window.removeEventListener("mouseup", up));
-    this.cleanup.push(() => window.removeEventListener("keydown", key));
+    this.cleanup.push(() => win.removeEventListener("mouseup", up));
+    this.cleanup.push(() => win.removeEventListener("keydown", key));
   }
 
   destroy(): void {

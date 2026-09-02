@@ -104,7 +104,7 @@ export interface RateLimit {
   requests: number;
   /** Window length in ms. */
   windowMs: number;
-  /** Min spacing between requests in ms (e.g. Dhan optionchain = 3000). */
+  /** Min spacing between consecutive requests in ms, where the venue caps burst rate. */
   minSpacingMs?: number;
 }
 

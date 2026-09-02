@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { ownerDocumentOf } from "../dom/ownerWindow";
 import type { IndicatorCategory, IndicatorDef, InputConfig } from "../indicators/types";
 import { useChartApi } from "./context";
 
@@ -7,6 +8,8 @@ export interface IndicatorPickerProps {
   style?: CSSProperties;
   /** Trigger button label. Default `"Indicators"`. */
   label?: string;
+  /** Compact square trigger (icon only, no text) for tight chrome. */
+  iconOnly?: boolean;
 }
 
 type Tab = "all" | IndicatorCategory;
@@ -30,7 +33,12 @@ const BADGE: Record<IndicatorCategory, string> = {
  * Wired to the enclosing {@link ChartView}'s indicator controller. Renders
  * nothing if indicators are not enabled.
  */
-export function IndicatorPicker({ className, style, label = "Indicators" }: IndicatorPickerProps) {
+export function IndicatorPicker({
+  className,
+  style,
+  label = "Indicators",
+  iconOnly = false,
+}: IndicatorPickerProps) {
   const { indicators } = useChartApi();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -51,11 +59,15 @@ export function IndicatorPicker({ className, style, label = "Indicators" }: Indi
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    // This picker's OWN document — a chart rendered into a second browser
+    // window never sees the main document's events, which would leave the
+    // popover stuck open with no way to dismiss it.
+    const doc = ownerDocumentOf(rootRef.current);
+    doc.addEventListener("mousedown", onDown);
+    doc.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      doc.removeEventListener("mousedown", onDown);
+      doc.removeEventListener("keydown", onKey);
     };
   }, [open]);
 
@@ -104,15 +116,16 @@ export function IndicatorPicker({ className, style, label = "Indicators" }: Indi
     <div ref={rootRef} className={className ?? "ck-ind"} style={style}>
       <button
         type="button"
-        className="ck-ind-trigger"
+        className={`ck-ind-trigger${iconOnly ? " ck-ind-trigger--icon" : ""}`}
         aria-expanded={open}
-        title="Indicators"
+        aria-label={label}
+        title={label}
         onClick={() => setOpen((o) => !o)}
       >
         <span className="ck-ind-trigger-icon">ƒ</span>
-        {label}
+        {!iconOnly && label}
         {activeCount > 0 && <span className="ck-ind-count">{activeCount}</span>}
-        <span className="ck-ind-caret">{open ? "▴" : "▾"}</span>
+        {!iconOnly && <span className="ck-ind-caret">{open ? "▴" : "▾"}</span>}
       </button>
 
       {open && (
@@ -257,17 +270,7 @@ function ParamRow({ cfg, value, onChange }: ParamRowProps) {
       <span className="ck-ind-param-label" title={labelText}>
         {labelText}
       </span>
-      {isNum && (
-        <input
-          type="number"
-          value={String(value ?? cfg.defval ?? "")}
-          step={cfg.type === "int" ? 1 : 0.01}
-          onChange={(e) => {
-            const v = cfg.type === "int" ? parseInt(e.target.value, 10) : parseFloat(e.target.value);
-            if (!Number.isNaN(v)) onChange(v);
-          }}
-        />
-      )}
+      {isNum && <NumberRow cfg={cfg} value={value} onChange={onChange} />}
       {cfg.type === "bool" && (
         <input
           type="checkbox"
@@ -285,6 +288,51 @@ function ParamRow({ cfg, value, onChange }: ParamRowProps) {
         </select>
       )}
     </div>
+  );
+}
+
+/**
+ * Numeric param input with LOCAL text state.
+ *
+ * A fully-controlled `value={committed}` that rejects NaN reverts the keystroke
+ * that made the field momentarily invalid — clearing it to type a new number,
+ * or typing "0." on the way to "0.5", is impossible. Keep the raw text here,
+ * push only parseable numbers up, and re-sync from the committed value on blur
+ * and whenever it changes from outside.
+ */
+function NumberRow({
+  cfg,
+  value,
+  onChange,
+}: {
+  cfg: InputConfig;
+  value: unknown;
+  onChange: (val: number) => void;
+}) {
+  const [text, setText] = useState(() => String(value ?? cfg.defval ?? ""));
+
+  useEffect(() => {
+    setText(String(value ?? cfg.defval ?? ""));
+  }, [value, cfg.defval]);
+
+  const min = typeof cfg.min === "number" ? cfg.min : undefined;
+  const max = typeof cfg.max === "number" ? cfg.max : undefined;
+  const step = cfg.type === "int" ? 1 : typeof cfg.step === "number" ? cfg.step : 0.01;
+
+  return (
+    <input
+      type="number"
+      value={text}
+      min={min}
+      max={max}
+      step={step}
+      onChange={(e) => {
+        setText(e.target.value);
+        const v = cfg.type === "int" ? parseInt(e.target.value, 10) : parseFloat(e.target.value);
+        if (!Number.isNaN(v)) onChange(v);
+      }}
+      onBlur={() => setText(String(value ?? cfg.defval ?? ""))}
+    />
   );
 }
 

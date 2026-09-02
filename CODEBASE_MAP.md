@@ -15,6 +15,9 @@ chart-lib/
 │   │   ├── time.ts               fixed-offset helpers, dateOf/timeOf
 │   │   └── theme.ts              light/dark presets, resolveTheme, buildThemeOptions
 │   ├── events/eventBus.ts        Typed EventBus
+│   ├── dom/                      Dependency-free DOM leaf (keeps core/ DOM-free)
+│   │   ├── ownerWindow.ts         ownerWindowOf / ownerDocumentOf — resolve from a node
+│   │   └── kv.ts                  KVStore + localStorageKV (shared storage backend)
 │   ├── plugins/types.ts          ChartPlugin, PluginContext, ChartEventMap
 │   ├── chart/ChartController.ts  Imperative LWC wrapper (the hub)
 │   ├── data-source/types.ts      BarDataSource / StreamingDataSource / ReplayDataSource

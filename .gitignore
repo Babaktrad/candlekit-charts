@@ -14,3 +14,6 @@ site/
 
 # candlekit-sync local-only sync state — never publish
 .candlekit-sync.json
+
+# local work log — never publish
+.project-memory/

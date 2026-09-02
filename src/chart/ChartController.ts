@@ -238,7 +238,9 @@ export class ChartController {
         shiftVisibleRangeOnNewBar: false,
         // Resize must not refit — preserves user pan/zoom across layout changes.
         lockVisibleTimeRangeOnResize: true,
-        rightOffset: 5,
+        // Keep the newest bar clear of the right-edge price axis so a forming
+        // candle is never flush against it. Does not change zoom.
+        rightOffset: 10,
       },
       handleScale: {
         axisPressedMouseMove: { time: false, price: true },

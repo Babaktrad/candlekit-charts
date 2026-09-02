@@ -4,6 +4,10 @@ import type { Bar, SeriesType } from "../core/types";
 import { resample, toBars, type RawBar } from "../core/data";
 import type { ResampleOptions } from "../core/types";
 import type { ThemeInput } from "../core/theme";
+import {
+  attachLiveEdgeFollower,
+  type LiveEdgeFollowerOptions,
+} from "../chart/liveEdgeFollower";
 import { DrawingController, type DrawingControllerOptions } from "../drawing/DrawingController";
 import type { IndicatorController } from "../indicators/IndicatorController";
 import { MeasurementController, type MeasurementOptions } from "../measurement/MeasurementController";
@@ -41,6 +45,12 @@ export interface ChartViewProps {
   sketch?: boolean | SketchSearchOptions;
   /** Enable Echoes / "market déjà vu". `true` or options. */
   echoes?: boolean | EchoesOptions;
+  /**
+   * Keep the newest bar in frame as live bars append. `true` for defaults, or
+   * pass {@link LiveEdgeFollowerOptions}. It only follows while the viewport is
+   * parked at the live edge — a user reading history is never pulled forward.
+   */
+  followLiveEdge?: boolean | LiveEdgeFollowerOptions;
 
   /** Fired once the chart + plugins are live. */
   onReady?: (api: ChartViewApi) => void;
@@ -69,6 +79,7 @@ export function ChartView({
   pointMarker,
   sketch,
   echoes,
+  followLiveEdge,
   onReady,
   className,
   style,
@@ -111,7 +122,16 @@ export function ChartView({
     if (drawingCtl) controller.use(drawingCtl);
     if (indicators) controller.use(indicators);
     if (measurement) {
-      measurementCtl = new MeasurementController(typeof measurement === "object" ? measurement : {});
+      const measureOpts = typeof measurement === "object" ? measurement : {};
+      measurementCtl = new MeasurementController({
+        ...measureOpts,
+        // An armed ruler must own the next click: without the lock, that click
+        // would grab the drawing underneath instead of finalising the ruler.
+        onArmedChange: (armed) => {
+          drawingCtl?.engine.setLocked(armed);
+          measureOpts.onArmedChange?.(armed);
+        },
+      });
       controller.use(measurementCtl);
     }
     if (pointMarker) {
@@ -149,6 +169,17 @@ export function ChartView({
     };
     // onReady intentionally excluded from deps — callers pass inline fns.
   }, [controller, drawingCtl, indicators, measurement, pointMarker, sketch, echoes]);
+
+  // Live-edge follower. Attached to the main series, so it re-attaches when the
+  // series type changes underneath it.
+  useEffect(() => {
+    if (!controller || !followLiveEdge) return;
+    return attachLiveEdgeFollower(
+      controller.getChart(),
+      controller.getSeries(),
+      typeof followLiveEdge === "object" ? followLiveEdge : {},
+    );
+  }, [controller, followLiveEdge, seriesType]);
 
   // Data.
   useEffect(() => {

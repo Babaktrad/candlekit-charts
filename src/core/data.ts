@@ -89,6 +89,26 @@ export function floorToBucket(
   );
 }
 
+const MINUTE_MS = 60_000;
+
+/**
+ * Bucket a live tick's timestamp to the START of the candle it belongs to at
+ * `intervalMinutes` — the same session-anchored boundary {@link resample} uses,
+ * NOT simply the minute. Sub-minute intervals floor to the minute.
+ *
+ * This is what a live-tick consumer must use to decide which bar to extend.
+ * Flooring to the minute on a 5m/15m chart spawns a fresh one-minute bar every
+ * minute instead of growing the bucket that is still forming.
+ */
+export function liveBucketMs(
+  tickMs: Timestamp,
+  intervalMinutes: number,
+  opts: ResampleOptions = {},
+): Timestamp {
+  if (intervalMinutes <= 1) return Math.floor(tickMs / MINUTE_MS) * MINUTE_MS;
+  return floorToBucket(tickMs, intervalMinutes, opts);
+}
+
 /**
  * Aggregate base-resolution rows into `intervalMinutes` candles. `<= 1m` is a
  * pass-through to {@link toBars}. Day+ buckets (`>= 1440`) collapse by calendar
