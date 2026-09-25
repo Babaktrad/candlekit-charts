@@ -17,3 +17,6 @@ site/
 
 # local work log — never publish
 .project-memory/
+
+# Local launch/promo drafts + media (not part of the package)
+promo/
