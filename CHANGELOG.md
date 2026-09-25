@@ -6,6 +6,11 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-25
+
+First npm release since 0.1.0 (the `v0.1.1` git tag was never published; its
+changes are included here).
+
 ### Added
 
 - **Lab — Sketch Search + Echoes** (experimental pattern-similarity analytics).
