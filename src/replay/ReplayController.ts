@@ -476,20 +476,40 @@ export class ReplayControllerImpl implements ReplayController {
   }
 
   private findInitialCursor(manifest: ReplayManifest): Timestamp | null {
+    // Earliest bar at or after manifest.start, across the series that HAVE one.
+    // A series with nothing on the picked day must not vote: its fallback is
+    // its own older day, and folding that into the min dragged the cursor back
+    // before every cached day of the series that do have the date, so they
+    // sliced to nothing.
     let best: Timestamp | null = null;
     for (const spec of this.activeSeries) {
       const cache = this.caches.get(seriesKey(spec));
       if (!cache) continue;
-      const idx = lowerBoundIndex(cache.flat, manifest.start);
-      // Manifest start beyond every cached bar (a non-session date): fall back
-      // to the OPEN of the latest cached day — not the last bar, which parked
-      // the cursor at the end of the data so Play had nothing to advance
-      // through.
-      const bar = cache.flat[idx] ?? firstBarOfLatestDay(cache);
-      if (!bar) continue;
-      if (best == null || bar.ts < best) best = bar.ts;
+      const bar = cache.flat[lowerBoundIndex(cache.flat, manifest.start)];
+      if (bar && (best == null || bar.ts < best)) best = bar.ts;
     }
-    return best;
+    if (best != null) return best;
+
+    // Manifest start beyond every cached bar (a non-session date): fall back to
+    // the OPEN of the latest cached day — not the last bar, which parked the
+    // cursor at the end of the data so Play had nothing to advance through. The
+    // LATEST day across series, for the same reason as above: a series that
+    // stopped earlier must not pull the cursor back.
+    let fallback: Bar | null = null;
+    for (const spec of this.activeSeries) {
+      const cache = this.caches.get(seriesKey(spec));
+      if (!cache) continue;
+      const bar = firstBarOfLatestDay(cache);
+      if (!bar) continue;
+      if (fallback == null) {
+        fallback = bar;
+        continue;
+      }
+      const d = tsToDate(bar.ts);
+      const fd = tsToDate(fallback.ts);
+      if (d > fd || (d === fd && bar.ts < fallback.ts)) fallback = bar;
+    }
+    return fallback?.ts ?? null;
   }
 
   private computeWindow(): { from: Timestamp; to: Timestamp } {

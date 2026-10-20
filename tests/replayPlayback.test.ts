@@ -3,7 +3,9 @@
  *
  * Four behaviours pinned here:
  *   1. A manifest start on a day with no bars parked the initial cursor at the
- *      END of the cached data — Play then had nothing to advance through.
+ *      END of the cached data — Play then had nothing to advance through. With
+ *      several series, one that has no bars on the picked day must not drag
+ *      the cursor back to its own older last day.
  *   2. Play while parked at the cached tail no-oped: the first advance failed
  *      and flipped `playing` straight back off.
  *   3. At a day boundary the cursor could outrun the forward prefetch and
@@ -97,6 +99,70 @@ describe("initial cursor placement", () => {
     // Old behaviour: cursor = the last cached bar (end of data) → Play no-oped.
     expect(readyState(c).cursor.ts).toBe(ts("2026-07-10", "09:15"));
     // 30 prefetched bars from the earlier day + the first bar of the latest.
+    expect(c.getBarsUpToCursor(SYM, TF).length).toBe(31);
+  });
+
+  // Two series where the second stops two sessions before the first. The
+  // early-stopping series has nothing at or after the start, and its own
+  // fallback (the open of ITS latest day) used to win the min — parking the
+  // cursor before every cached day of the primary series.
+  const OTHER: SymbolId = "OTHER";
+  function makeMultiSource(bySymbol: Record<SymbolId, Record<string, Bar[]>>): ReplayDataSource {
+    const datesOf = (s: SymbolId) => Object.keys(bySymbol[s] ?? {}).sort();
+    return {
+      async fetchDay(s, _i, date) {
+        return bySymbol[s]?.[date] ?? [];
+      },
+      async listDatesBefore(s, _i, date, n) {
+        return datesOf(s)
+          .filter((d) => d < date)
+          .reverse()
+          .slice(0, n);
+      },
+      async listDatesAfter(s, _i, date, n) {
+        return datesOf(s)
+          .filter((d) => d > date)
+          .slice(0, n);
+      },
+    };
+  }
+  function twoSeriesManifest(source: ReplayDataSource, startDate: string): ReplayManifest {
+    return {
+      ...makeManifest(source, startDate),
+      series: [
+        { symbol: SYM, interval: TF },
+        { symbol: OTHER, interval: TF },
+      ],
+    };
+  }
+  const PRIMARY_DAYS = {
+    "2026-07-09": dayBars("2026-07-09", 30),
+    "2026-07-10": dayBars("2026-07-10", 30),
+    "2026-07-13": dayBars("2026-07-13", 30),
+  };
+  const STOPS_EARLY = {
+    "2026-07-07": dayBars("2026-07-07", 30),
+    "2026-07-08": dayBars("2026-07-08", 30),
+  };
+
+  it("a series with no bars on the picked day does not drag the cursor back to its own last day", async () => {
+    const source = makeMultiSource({ [SYM]: PRIMARY_DAYS, [OTHER]: STOPS_EARLY });
+    const c = new ReplayControllerImpl();
+    await c.load(twoSeriesManifest(source, "2026-07-13"));
+    expect(readyState(c).cursor.ts).toBe(ts("2026-07-13", "09:15"));
+    // 07-09 + 07-10 prefetched + 07-13's first bar.
+    expect(c.getBarsUpToCursor(SYM, TF).length).toBe(61);
+  });
+
+  it("the no-bars fallback takes the LATEST day across series, not the earliest", async () => {
+    // 2026-07-12 is a non-session date: no series has a bar at or after it.
+    const source = makeMultiSource({
+      [SYM]: { "2026-07-09": PRIMARY_DAYS["2026-07-09"], "2026-07-10": PRIMARY_DAYS["2026-07-10"] },
+      [OTHER]: STOPS_EARLY,
+    });
+    const c = new ReplayControllerImpl();
+    await c.load(twoSeriesManifest(source, "2026-07-12"));
+    expect(readyState(c).cursor.ts).toBe(ts("2026-07-10", "09:15"));
     expect(c.getBarsUpToCursor(SYM, TF).length).toBe(31);
   });
 

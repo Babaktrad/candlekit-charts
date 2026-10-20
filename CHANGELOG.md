@@ -6,6 +6,20 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replay: a series with no bars on the picked day no longer drags the cursor
+  back.** With several series in a manifest, one that has nothing at or after
+  `manifest.start` used to vote with its own fallback (the open of *its* latest
+  cached day), so the min parked the initial cursor before every cached day of
+  the series that do have the date and they sliced to nothing. Only series
+  with a bar at or after the start now vote; when none has one (a non-session
+  date) the fallback takes the latest cached day across series, not the
+  earliest.
+- **`<ChartContextMenu>` stays inside the viewport.** Opened near the bottom or
+  right edge, or made tall by many `extraItems`, the menu used to hang
+  off-screen; it is now clamped 4px inside its window.
+
 ## [0.2.0] — 2026-09-25
 
 First npm release since 0.1.0 (the `v0.1.1` git tag was never published; its

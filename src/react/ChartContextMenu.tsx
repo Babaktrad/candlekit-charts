@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { ownerWindowOf } from "../dom/ownerWindow";
 import { PRIMARY_PANE_KEY, indicatorPaneKeys } from "../indicators/paneKeyRegistry";
 import type { Drawing } from "../drawing/types";
@@ -146,6 +153,19 @@ export function ChartContextMenu({
       win.removeEventListener("keydown", onKey);
     };
   }, [pos, controller, close]);
+
+  // Keep the menu inside the viewport: opened near the bottom or right edge (or
+  // made tall by many host items) it would hang off-screen. Settles in one
+  // pass — a clamped position re-measures to itself.
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!pos || !el) return;
+    const win = ownerWindowOf(el);
+    const r = el.getBoundingClientRect();
+    const x = Math.max(4, Math.min(pos.x, win.innerWidth - r.width - 4));
+    const y = Math.max(4, Math.min(pos.y, win.innerHeight - r.height - 4));
+    if (x !== pos.x || y !== pos.y) setPos({ x, y });
+  }, [pos]);
 
   if (!pos || !ctx) return null;
 

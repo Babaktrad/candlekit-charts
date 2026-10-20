@@ -197,6 +197,51 @@ describe("ChartContextMenu", () => {
     expect(seen!.price).toBeNull();
   });
 
+  describe("viewport clamp", () => {
+    // happy-dom does no layout, so give the menu a real size: 200 x 300.
+    const MENU_W = 200;
+    const MENU_H = 300;
+    let rectSpy: { mockRestore(): void };
+    beforeEach(() => {
+      rectSpy = vi
+        .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+        .mockImplementation(function (this: HTMLElement) {
+          const isMenu = this.getAttribute("role") === "menu";
+          const width = isMenu ? MENU_W : 0;
+          const height = isMenu ? MENU_H : 0;
+          return {
+            x: 0,
+            y: 0,
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+            width,
+            height,
+            toJSON() {},
+          } as DOMRect;
+        });
+    });
+    afterEach(() => rectSpy.mockRestore());
+
+    const ITEMS = { extraItems: [{ id: "x", label: "x", onSelect: () => {} }] };
+    const box = () => menu() as HTMLElement;
+
+    it("opens at the click point when the menu fits", () => {
+      mount(api(chartEl), ITEMS);
+      rightClick(40, 40);
+      expect(box().style.left).toBe("40px");
+      expect(box().style.top).toBe("40px");
+    });
+
+    it("pulls a menu opened near the bottom-right corner back inside the window", () => {
+      mount(api(chartEl), ITEMS);
+      rightClick(window.innerWidth - 10, window.innerHeight - 10);
+      expect(box().style.left).toBe(`${window.innerWidth - MENU_W - 4}px`);
+      expect(box().style.top).toBe(`${window.innerHeight - MENU_H - 4}px`);
+    });
+  });
+
   it("closes on Escape", () => {
     mount(api(chartEl), { extraItems: [{ id: "x", label: "x", onSelect: () => {} }] });
     rightClick();
