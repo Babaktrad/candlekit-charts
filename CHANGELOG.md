@@ -6,6 +6,8 @@ to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-20
+
 ### Fixed
 
 - **Replay: a series with no bars on the picked day no longer drags the cursor
