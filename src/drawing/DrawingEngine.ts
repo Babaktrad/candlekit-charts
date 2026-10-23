@@ -19,6 +19,14 @@ import {
   type DrawingPoint,
 } from "./types";
 
+export interface DrawingDuplicateOptions {
+  /** Optional data-space replacement for the copied anchors. */
+  points?: DrawingPoint[];
+  /** Data-space fallback offsets used when a caller has no screen projection. */
+  timeOffset?: number;
+  priceOffset?: number;
+}
+
 let counter = 0;
 const newId = () => `dw_${Date.now().toString(36)}_${(counter++).toString(36)}`;
 
@@ -26,6 +34,7 @@ export class DrawingEngine {
   private drawings: Drawing[] = [];
   private draft: Drawing | null = null;
   private selectedId: string | null = null;
+  private selectionRevision = 0;
   private activeTool: DrawingToolId | null = null;
   private locked = false;
   private style: DrawingStyle = { ...DEFAULT_STYLE };
@@ -112,6 +121,38 @@ export class DrawingEngine {
     return this.drawings.find((d) => d.id === id);
   }
 
+  /**
+   * Duplicate a drawing and select the copy. Adapters that can project chart
+   * coordinates should provide `points` so the copy is offset in screen space;
+   * data-space offsets are the deterministic fallback for framework-free users.
+   */
+  duplicate(id = this.selectedId, options: DrawingDuplicateOptions = {}): Drawing | null {
+    if (!id) return null;
+    const original = this.getById(id);
+    if (!original) return null;
+
+    const timeOffset = options.timeOffset ?? 60;
+    const priceOffset = options.priceOffset ?? 0.01;
+    const copy: Drawing = {
+      ...original,
+      id: newId(),
+      points: options.points?.map((point) => ({ ...point })) ?? original.points.map((point) => ({
+        time: point.time + timeOffset,
+        price: point.price + priceOffset,
+      })),
+      style: {
+        ...original.style,
+        levels: original.style.levels?.map((level) => ({ ...level })),
+      },
+      text: original.text ? { ...original.text } : undefined,
+    };
+
+    this.drawings.push(copy);
+    this.selectedId = copy.id;
+    this.emit();
+    return copy;
+  }
+
   setPoints(id: string, points: DrawingPoint[]): void {
     const d = this.getById(id);
     if (!d) return;
@@ -144,11 +185,20 @@ export class DrawingEngine {
 
   select(id: string | null): void {
     this.selectedId = id;
+    this.selectionRevision += 1;
     this.emit();
   }
 
   getSelectedId(): string | null {
     return this.selectedId;
+  }
+
+  /**
+   * Monotonically increases for every explicit selection change, including
+   * selecting the same drawing again.
+   */
+  getSelectionRevision(): number {
+    return this.selectionRevision;
   }
 
   removeSelected(): void {

@@ -65,6 +65,41 @@ describe("DrawingEngine N-point placement", () => {
     expect(e.getById(e.getSelectedId()!)?.text?.value).toBe("Note");
     expect(e.export()).toContain('"value":"Note"');
   });
+
+  it("duplicates a drawing with a new id and an explicit offset", () => {
+    const e = new DrawingEngine();
+    e.commit({
+      id: e.newDrawingId(),
+      tool: "TrendLine",
+      points: [p(1, 10), p(2, 20)],
+      style: e.getDefaultStyle("TrendLine"),
+    });
+
+    const original = e.getDrawings()[0];
+    const copy = e.duplicate(original.id, { timeOffset: 5, priceOffset: 2 });
+
+    expect(copy).not.toBeNull();
+    expect(copy?.id).not.toBe(original.id);
+    expect(copy?.points).toEqual([p(6, 12), p(7, 22)]);
+    expect(e.getSelectedId()).toBe(copy?.id);
+  });
+
+  it("increments the selection revision when the selected drawing is clicked again", () => {
+    const e = new DrawingEngine();
+    e.commit({
+      id: e.newDrawingId(),
+      tool: "TrendLine",
+      points: [p(1, 10), p(2, 20)],
+      style: e.getDefaultStyle("TrendLine"),
+    });
+
+    const id = e.getSelectedId()!;
+    const firstRevision = e.getSelectionRevision();
+    e.select(id);
+
+    expect(e.getSelectedId()).toBe(id);
+    expect(e.getSelectionRevision()).toBe(firstRevision + 1);
+  });
 });
 
 describe("drawing style defaults", () => {

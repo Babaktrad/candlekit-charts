@@ -66,7 +66,11 @@ export class DrawingController implements ChartPlugin {
     const offChange = this.engine.onChange(() => {
       this.primitive?.redraw();
       if (this.storageKey) saveDrawings(this.engine, this.storageKey, this.kv);
-      ctx.bus.emit("drawingChange", { count: this.engine.getDrawings().length });
+      ctx.bus.emit("drawingChange", {
+        count: this.engine.getDrawings().length,
+        selectedId: this.engine.getSelectedId(),
+        selectionRevision: this.engine.getSelectionRevision(),
+      });
     });
     this.cleanup.push(offChange);
 
@@ -125,6 +129,25 @@ export class DrawingController implements ChartPlugin {
     if (this.engine.isLocked()) return false;
     if (this.engine.getActiveTool()) return true;
     return this.hitTest(x, y) !== null;
+  }
+
+  /**
+   * Duplicate the selected drawing with a small screen-space offset. Using the
+   * chart projection keeps the copy distinguishable at every timeframe and
+   * price scale, including one-point horizontal/vertical tools.
+   */
+  duplicateSelected(offsetX = 20, offsetY = -20): Drawing | null {
+    const selectedId = this.engine.getSelectedId();
+    const selected = selectedId ? this.engine.getById(selectedId) : undefined;
+    if (!selectedId || !selected) return null;
+
+    const points = selected.points.map((point) => {
+      const projected = this.project(point);
+      if (!projected) return { ...point };
+      return this.unproject(projected.x + offsetX, projected.y + offsetY) ?? { ...point };
+    });
+
+    return this.engine.duplicate(selectedId, { points });
   }
 
   // ── pointer / keyboard ───────────────────────────────────────────────────────
