@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { DrawingEngine } from "../src/drawing/DrawingEngine";
 import { DRAWING_TOOL_GROUPS, DRAWING_TOOL_ICONS } from "../src/drawing/icons";
 import { DEFAULT_TOOL_STYLES, FIB_LEVELS, TOOL_POINTS } from "../src/drawing/types";
+import { drawingTimeForLogical, logicalForDrawingTime } from "../src/drawing/coordinateMapping";
 
 const p = (time: number, price: number) => ({ time, price });
 
@@ -19,6 +20,25 @@ describe("TOOL_POINTS", () => {
     expect(TOOL_POINTS.RotatedRectangle).toBe(3);
     expect(TOOL_POINTS.XABCDPattern).toBe(5);
     expect(TOOL_POINTS.Text).toBe(1);
+  });
+});
+
+describe("drawing whitespace coordinate mapping", () => {
+  const bars = [
+    { ts: 1_000, open: 1, high: 2, low: 0, close: 1 },
+    { ts: 2_000, open: 1, high: 2, low: 0, close: 1 },
+    { ts: 5_000, open: 1, high: 2, low: 0, close: 1 },
+  ];
+
+  it("interpolates a timestamp placed in a gap back to its logical position", () => {
+    expect(logicalForDrawingTime(3.5, bars)).toBe(1.5);
+    expect(drawingTimeForLogical(1.5, bars)).toBe(3.5);
+  });
+
+  it("extrapolates drawing anchors just outside the loaded data", () => {
+    expect(logicalForDrawingTime(0, bars)).toBe(-1);
+    expect(drawingTimeForLogical(-0.5, bars)).toBe(0.5);
+    expect(logicalForDrawingTime(6, bars)).toBeCloseTo(2.3333333333);
   });
 });
 

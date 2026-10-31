@@ -10,14 +10,28 @@
  *     reshape. Delete/Backspace removes the selection; Escape cancels/deselects.
  */
 
-import type { IChartApi, ISeriesApi, Time } from "lightweight-charts";
+import type { IChartApi, ISeriesApi } from "lightweight-charts";
 import type { ChartPlugin, PluginContext } from "../plugins/types";
+import type { Bar } from "../core/types";
 import { ownerWindowOf } from "../dom/ownerWindow";
 import { DrawingEngine } from "./DrawingEngine";
 import { DrawingPrimitive } from "./DrawingPrimitive";
 import { localStorageKV, saveDrawings, loadDrawings, type KVStore } from "./persistence";
 import { FIB_LEVELS, FIB_EXT_LEVELS, type Drawing, type DrawingPoint } from "./types";
+import { drawingTimeForLogical, drawingXForPoint, logicalForDrawingTime } from "./coordinateMapping";
 import { distToSegment, distToLine, distToRay, distToRectEdges, distToEllipse, pointInRect, type Pt } from "./geometry";
+
+/** Diagnostic information emitted for drawing interactions when requested. */
+export interface DrawingDiagnostic {
+  phase: "pointerdown" | "drag" | "pointerup";
+  action?: "place" | "select" | "move" | "resize";
+  drawingId?: string | null;
+  tool?: string | null;
+  pointer?: Pt;
+  dataPoint?: DrawingPoint | null;
+  delta?: Pt;
+  reason?: string;
+}
 
 export interface DrawingControllerOptions {
   /** Provide your own engine (e.g. shared). Defaults to a fresh one. */
@@ -28,10 +42,18 @@ export interface DrawingControllerOptions {
   kv?: KVStore;
   /** Hit-test tolerance in px. Default 6. */
   hitTolerance?: number;
+  /** Optional diagnostic sink for investigating drawing interactions. */
+  onDiagnostic?: (entry: DrawingDiagnostic) => void;
 }
 
 type AnySeries = ISeriesApi<"Candlestick" | "Bar" | "Line" | "Area">;
-type DragMode = { id: string; kind: "move" | "anchor"; anchorIndex: number; last: DrawingPoint };
+type DragMode = {
+  id: string;
+  kind: "move" | "anchor";
+  anchorIndex: number;
+  last: DrawingPoint;
+  lastPointer: Pt;
+};
 
 export class DrawingController implements ChartPlugin {
   readonly id = "drawing";
@@ -46,17 +68,21 @@ export class DrawingController implements ChartPlugin {
   private readonly tol: number;
   private readonly storageKey: string | null;
   private readonly kv: KVStore;
+  private readonly onDiagnostic: ((entry: DrawingDiagnostic) => void) | undefined;
+  private getBars: () => readonly Bar[] = () => [];
 
   constructor(opts: DrawingControllerOptions = {}) {
     this.engine = opts.engine ?? new DrawingEngine();
     this.tol = opts.hitTolerance ?? 6;
     this.storageKey = opts.storageKey ?? null;
     this.kv = opts.kv ?? localStorageKV;
+    this.onDiagnostic = opts.onDiagnostic;
   }
 
   init(ctx: PluginContext): void {
     this.chart = ctx.chart;
     this.series = ctx.series;
+    this.getBars = ctx.getBars;
     this.el = ctx.chart.chartElement();
     this.primitive = new DrawingPrimitive(this.engine, ctx.getBars);
     this.series.attachPrimitive(this.primitive);
@@ -158,6 +184,7 @@ export class DrawingController implements ChartPlugin {
     if (!point) return;
     const dp = this.unproject(point.x, point.y);
     const tool = this.engine.getActiveTool();
+    this.report({ phase: "pointerdown", action: tool ? "place" : "select", tool, pointer: point, dataPoint: dp });
 
     if (tool) {
       if (!dp) return;
@@ -197,7 +224,22 @@ export class DrawingController implements ChartPlugin {
       e.preventDefault();
       e.stopPropagation();
       this.engine.select(hit.id);
-      this.drag = { id: hit.id, kind: hit.kind, anchorIndex: hit.anchorIndex, last: dp };
+      const drawing = this.engine.getById(hit.id);
+      this.drag = {
+        id: hit.id,
+        kind: hit.kind,
+        anchorIndex: hit.anchorIndex,
+        last: dp,
+        lastPointer: point,
+      };
+      this.report({
+        phase: "pointerdown",
+        action: hit.kind === "anchor" ? "resize" : "move",
+        drawingId: hit.id,
+        tool: drawing?.tool ?? null,
+        pointer: point,
+        dataPoint: dp,
+      });
       this.suppressPan(true);
     } else {
       this.engine.select(null); // let the chart pan
@@ -224,17 +266,42 @@ export class DrawingController implements ChartPlugin {
       const points = d.points.slice();
       points[this.drag.anchorIndex] = dp;
       this.engine.setPoints(this.drag.id, points);
+      this.report({
+        phase: "drag",
+        action: "resize",
+        drawingId: d.id,
+        tool: d.tool,
+        pointer: point,
+        dataPoint: dp,
+        delta: {
+          x: point.x - this.drag.lastPointer.x,
+          y: point.y - this.drag.lastPointer.y,
+        },
+      });
     } else {
-      const dt = dp.time - this.drag.last.time;
-      const dpr = dp.price - this.drag.last.price;
-      const points = d.points.map((p) => ({ time: p.time + dt, price: p.price + dpr }));
+      const delta = {
+        x: point.x - this.drag.lastPointer.x,
+        y: point.y - this.drag.lastPointer.y,
+      };
+      const points = this.translatePoints(d, delta);
       this.engine.setPoints(this.drag.id, points);
+      this.report({
+        phase: "drag",
+        action: "move",
+        drawingId: d.id,
+        tool: d.tool,
+        pointer: point,
+        dataPoint: dp,
+        delta,
+      });
     }
     this.drag.last = dp;
+    this.drag.lastPointer = point;
   }
 
   private onUp(): void {
     if (this.drag) {
+      this.report({ phase: "pointerup", action: this.drag.kind === "anchor" ? "resize" : "move", drawingId: this.drag.id });
       this.drag = null;
       this.suppressPan(false);
     }
@@ -280,17 +347,82 @@ export class DrawingController implements ChartPlugin {
     this.chart?.applyOptions({ handleScroll: { pressedMouseMove: !on } });
   }
 
+  /**
+   * Move a drawing by a common screen-space delta and convert each anchor back
+   * through the current chart scales. Raw timestamp arithmetic is deliberately
+   * avoided: a timestamp created by adding a delta can fall into a market gap
+   * and then `timeToCoordinate` returns null, making the drawing disappear.
+   */
+  private translatePoints(drawing: Drawing, delta: Pt): DrawingPoint[] {
+    if (!this.chart || !this.series) return drawing.points.map((point) => ({ ...point }));
+
+    const series = this.series;
+    const timeScale = this.chart.timeScale();
+    const width = Math.max(1, timeScale.width());
+    const height = Math.max(1, this.chart.paneSize(0).height);
+    const projected = drawing.points.map((point) => this.project(point));
+    const visible = projected.filter((point): point is Pt => point !== null);
+
+    // Keep the complete drawing in the current pane while it is being moved.
+    // This prevents an anchor from being converted outside the loaded domain
+    // and preserves the object's dimensions instead of clipping one endpoint.
+    const minX = visible.length ? Math.min(...visible.map((point) => point.x)) : 0;
+    const maxX = visible.length ? Math.max(...visible.map((point) => point.x)) : width;
+    const minY = visible.length ? Math.min(...visible.map((point) => point.y)) : 0;
+    const maxY = visible.length ? Math.max(...visible.map((point) => point.y)) : height;
+    const dx = clamp(delta.x, -minX, width - maxX);
+    const dy = clamp(delta.y, -minY, height - maxY);
+
+    const fromLogical = timeScale.coordinateToLogical(this.drag?.lastPointer.x ?? 0);
+    const toLogical = timeScale.coordinateToLogical((this.drag?.lastPointer.x ?? 0) + dx);
+    const logicalDelta = fromLogical == null || toLogical == null ? null : toLogical - fromLogical;
+
+    return drawing.points.map((point, index) => {
+      const currentIndex = logicalForDrawingTime(point.time, this.getBars()) ?? point.logical;
+      const targetLogical = currentIndex != null && logicalDelta != null
+        ? Number(currentIndex) + logicalDelta
+        : null;
+      const targetTime = targetLogical == null ? null : drawingTimeForLogical(targetLogical, this.getBars());
+      const currentY = series.priceToCoordinate(point.price);
+      const targetPrice = currentY == null ? null : series.coordinateToPrice(currentY + dy);
+
+      if (targetTime == null || targetPrice == null) {
+        this.report({
+          phase: "drag",
+          action: "move",
+          drawingId: drawing.id,
+          tool: drawing.tool,
+          delta: { x: dx, y: dy },
+          reason: `anchor-${index}-conversion-failed`,
+        });
+        return { ...point };
+      }
+      return { time: targetTime, price: targetPrice as number, logical: targetLogical ?? point.logical };
+    });
+  }
+
+  private report(entry: DrawingDiagnostic): void {
+    try {
+      this.onDiagnostic?.(entry);
+    } catch {
+      // Diagnostics must never interfere with chart interaction.
+    }
+  }
+
   private unproject(x: number, y: number): DrawingPoint | null {
     if (!this.chart || !this.series) return null;
-    const time = this.chart.timeScale().coordinateToTime(x);
+    const timeScale = this.chart.timeScale();
+    const logical = timeScale.coordinateToLogical(x);
     const price = this.series.coordinateToPrice(y);
-    if (time == null || price == null) return null;
-    return { time: time as number, price: price as number };
+    if (logical == null || price == null) return null;
+    const time = timeScale.coordinateToTime(x) ?? drawingTimeForLogical(Number(logical), this.getBars());
+    if (time == null) return null;
+    return { time: Number(time), price: price as number, logical: Number(logical) };
   }
 
   private project(p: DrawingPoint): Pt | null {
     if (!this.chart || !this.series) return null;
-    const x = this.chart.timeScale().timeToCoordinate(p.time as Time);
+    const x = drawingXForPoint(p, this.chart.timeScale(), this.getBars());
     const y = this.series.priceToCoordinate(p.price);
     if (x == null || y == null) return null;
     return { x, y };
@@ -448,4 +580,8 @@ export class DrawingController implements ChartPlugin {
         return !!b && distToSegment(p, a, b) <= t;
     }
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

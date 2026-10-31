@@ -3,9 +3,9 @@
  * selection handles. Reads the model from a {@link DrawingEngine} and projects
  * data anchors to pixels via the chart time scale + series price scale.
  *
- * Off-screen anchors (time scrolled out of the data range) project to `null`
- * and that drawing is skipped for the frame — horizontal lines (price-only) and
- * the price axis always render.
+ * Anchors are projected through the time scale's logical coordinates when
+ * their timestamp is in a whitespace region, so a drawing does not disappear
+ * merely because no candle exists at that exact time.
  */
 
 import type {
@@ -28,6 +28,7 @@ import {
 } from "./types";
 import type { DrawingEngine } from "./DrawingEngine";
 import type { Bar } from "../core/types";
+import { drawingXForPoint } from "./coordinateMapping";
 
 interface Anchor {
   x: number | null;
@@ -861,9 +862,9 @@ export class DrawingPrimitive implements ISeriesPrimitive<Time> {
     }));
   }
 
-  private project(p: { time: number; price: number }): Anchor {
+  private project(p: { time: number; price: number; logical?: number }): Anchor {
     if (!this.chart || !this.series) return { x: null, y: null };
-    const x = this.chart.timeScale().timeToCoordinate(p.time as Time);
+    const x = drawingXForPoint(p, this.chart.timeScale(), this.getBars());
     const y = this.series.priceToCoordinate(p.price);
     return { x: x == null ? null : x, y: y == null ? null : y };
   }

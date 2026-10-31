@@ -52,6 +52,7 @@ export * from "./drawing/geometry";
 export * from "./drawing/DrawingEngine";
 export * from "./drawing/DrawingPrimitive";
 export * from "./drawing/DrawingController";
+export * from "./drawing/coordinateMapping";
 export * from "./drawing/persistence";
 
 // ── Measurement ─────────────────────────────────────────────────────────────────

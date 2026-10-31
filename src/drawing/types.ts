@@ -169,10 +169,17 @@ export const TOOL_POINTS: Record<string, number> = {
   AnchoredVWAP: 1,
 };
 
-/** An anchor in data space: `time` is the lightweight-charts time (epoch seconds). */
+/**
+ * An anchor in data space. `time` is the lightweight-charts time (epoch
+ * seconds). `logical` is an optional continuous bar index captured when the
+ * anchor was placed in whitespace between loaded bars. It is a rendering
+ * fallback, not a second data source, and remains backward-compatible with
+ * persisted points that only contain `time` and `price`.
+ */
 export interface DrawingPoint {
   time: number;
   price: number;
+  logical?: number;
 }
 
 /** Styling for one generated level in ladder-style drawing tools. */
